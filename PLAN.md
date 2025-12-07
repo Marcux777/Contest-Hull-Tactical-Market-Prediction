@@ -1,0 +1,23 @@
+# Plano – próximos passos
+- [x] Plano rápido – corrigir warnings de fragmentação
+  - [x] Identificar onde `df_proc[name] = series` é chamado em loop no notebook e mapear colunas criadas.
+  - [x] Refatorar o pré-processamento para criar colunas derivadas em bloco com `pd.concat`/`assign`, evitando inserts repetidos.
+  - [x] Garantir consistência da lista de colunas entre train/val/test e sincronizar notebook com jupytext.
+- [x] Guia Pearson/ensemble (foco em correlação e direção)
+  - [x] Estruturar notebook com seções (cabeçalho/config com scorer Pearson, leitura/cheques, engenharia de sinais fracos, validação temporal, modelos base, ensemble, robustez, inferência, log).
+  - [x] Engenharia de features: momentum acumulado (3/5/10/20), reversão (desvio de média/Bollinger), scalers cross-section por dia (rank/z), winsor/clip leve; incluir macro/FX/commodities defasadas se permitido.
+  - [x] Validação temporal com purge/embargo ou rolling (ex. 60/20), métrica Pearson por janela; gráficos de distribuição de correlação e série temporal da correlação.
+  - [x] Modelos base orientados a direção: Ridge/ElasticNet com features z/rank, LightGBM raso, regressão logística no sinal (target binário [-1,1]), KNN rank-based opcional.
+  - [x] Ensemble focado em rank/sinal: blending recursivo/meta-modelo (Ridge) nos ranks das previsões, shrinkage de pesos (inverso da variância de erro), stacking time-aware com ranks/quantis, calibração final via rank/quantil por dia.
+  - [x] Estabilidade e robustez: backtest por regimes de vol, turnover de rank por dia, sensibilidade a lags e drift de distribuição.
+- [x] Inferência e submissão: pipeline determinístico (mesmos scalers por data), pós-processamento `groupby(date_id).rank`/z-score para [-1,1], export CSV com checagens de integridade.
+- [x] Diário de experimentos: log curto com features+modelo, CV Pearson (média/desvio), pesos do ensemble, seeds e observações de estabilidade; guardar snippets úteis (scorer Pearson, rank_by_day, pesos com shrinkage).
+- [x] Dicas táticas: padronizar por dia, otimizar para Pearson no CV, gerar predições rankeadas, priorizar diversidade de sinais fracos e shrinkage nos pesos.
+- [ ] Modelagem — pesos e Optuna
+  - [x] Revisar CV/treino LGBM para incluir pesos em `is_scored` e variante train_only_scored quando aplicável.
+  - [x] Fortalecer bloco do Optuna focando 4–5 hiperparâmetros-chave, trials ~40, e deixar `study.optimize` pronto para uso.
+  - [x] Incluir variantes LGBM (conservadora/weighted) no pipeline de CV/ensemble e refletir no treino final/submissão.
+  - [ ] Sincronizar notebook `.py` ↔ `.ipynb` com `jupytext --sync` após ajustes.
+- [ ] Corrigir CV fit_ref (ValueError em prepare_features)
+  - [ ] Identificar e remover/deduplicar colunas que ainda chegam duplicadas no fluxo do `time_cv_lightgbm_fitref`/`build_feature_sets`, evitando que `df_sorted[c]` retorne DataFrame e gere “truth value of a Series is ambiguous”.
+  - [ ] Validar `time_cv_lightgbm_fitref` rodando sem erros com o feature set `D_intentional` após o ajuste.
