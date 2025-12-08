@@ -724,7 +724,7 @@ def prepare_features(df, target):
 
 def preprocess_basic(df, feature_cols, ref_cols=None):
     feature_cols = list(dict.fromkeys(feature_cols))
-    feature_frame = df[feature_cols]
+    feature_frame = df.reindex(columns=feature_cols)
     medians = feature_frame.median()
     filled = feature_frame.fillna(medians).fillna(0)
 
@@ -765,7 +765,10 @@ def append_columns(df, cols_dict):
     if not cols_dict:
         return df
     new_df = pd.DataFrame(cols_dict, index=df.index)
-    return pd.concat([df, new_df], axis=1)
+    combined = pd.concat([df, new_df], axis=1)
+    if combined.columns.has_duplicates:
+        combined = combined.loc[:, ~combined.columns.duplicated(keep="last")]
+    return combined
 
 
 def add_missing_columns(df, columns, fill_value=np.nan):
@@ -775,6 +778,46 @@ def add_missing_columns(df, columns, fill_value=np.nan):
         return df
     filler = {c: fill_value for c in missing}
     return append_columns(df, filler)
+
+
+def align_feature_frames(train_df, other_df, feature_cols):
+    """
+    Garante alinhamento de colunas entre treino/val/test antes do preprocess_basic:
+    - remove duplicadas mantendo a última ocorrência;
+    - adiciona colunas faltantes;
+    - descarta features completamente NaN ou constantes no treino.
+    Retorna dataframes alinhados e a lista de features válida.
+    """
+    cols_unique = list(dict.fromkeys(feature_cols))
+    train_clean = train_df.copy()
+    if train_clean.columns.has_duplicates:
+        train_clean = train_clean.loc[:, ~train_clean.columns.duplicated(keep="last")]
+
+    other_clean = None
+    if other_df is not None:
+        other_clean = other_df.copy()
+        if other_clean.columns.has_duplicates:
+            other_clean = other_clean.loc[:, ~other_clean.columns.duplicated(keep="last")]
+
+    train_clean = add_missing_columns(train_clean, cols_unique)
+    if other_clean is not None:
+        other_clean = add_missing_columns(other_clean, cols_unique)
+
+    valid_cols = []
+    for c in cols_unique:
+        series = train_clean[c]
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        if series.isna().all():
+            continue
+        if series.std(ddof=0) <= 1e-12:
+            continue
+        valid_cols.append(c)
+
+    train_clean = add_missing_columns(train_clean, valid_cols)
+    if other_clean is not None:
+        other_clean = add_missing_columns(other_clean, valid_cols)
+    return train_clean, other_clean, valid_cols
 
 
 def add_lagged_market_features(df):
@@ -1041,6 +1084,8 @@ def build_feature_sets(df, target, intentional_cfg=None, fe_cfg=None, fit_ref=No
     df_eng = add_cross_sectional_norms(df_eng)
     df_eng = add_surprise_features(df_eng)
     df_eng = add_finance_combos(df_eng)
+    if df_eng.columns.has_duplicates:
+        df_eng = df_eng.loc[:, ~df_eng.columns.duplicated(keep="last")]
     df_eng, all_cols = prepare_features(df_eng, target)
 
     base_cols = [c for c in orig_numeric if c in all_cols]
@@ -1067,7 +1112,7 @@ def build_feature_sets(df, target, intentional_cfg=None, fe_cfg=None, fit_ref=No
     return df_eng, feature_sets
 
 
-def build_features(
+def make_features(
     train_df,
     test_df=None,
     target_col=TARGET_COL,
@@ -1076,7 +1121,7 @@ def build_features(
     fe_cfg=None,
 ):
     """
-    Pipeline único de features:
+    Pipeline único de features para todos os fluxos (CV, diagnósticos e treino final):
     - lags, agregações por família, regimes, features intencionais;
     - winsor/clipping, razões/diferenças, normalização cross-section, surprise features, combos financeiros;
     - aplica o mesmo fit de FE no teste via fit_ref.
@@ -1092,11 +1137,514 @@ def build_features(
     return train_fe, test_fe, feature_cols, feature_sets, feature_set
 
 
+def build_features(
+    train_df,
+    test_df=None,
+    target_col=TARGET_COL,
+    feature_set=None,
+    intentional_cfg=None,
+    fe_cfg=None,
+):
+    """Alias para manter compatibilidade com chamadas antigas; delega para make_features."""
+    return make_features(
+        train_df,
+        test_df=test_df,
+        target_col=target_col,
+        feature_set=feature_set,
+        intentional_cfg=intentional_cfg,
+        fe_cfg=fe_cfg,
+    )
+
+
+# %%
+# Módulo de features (materializado para Kaggle/offline)
+import sys
+import textwrap
+from pathlib import Path
+
+FEATURES_SRC = Path('src/hull_features.py')
+if FEATURES_SRC.exists():
+    HULL_FEATURES_CODE = FEATURES_SRC.read_text()
+else:
+    HULL_FEATURES_CODE = textwrap.dedent('''"""
+Feature engineering and preprocessing helpers for the Hull Tactical notebook.
+Kept dependency-free (pandas/numpy only) so they can run inside Kaggle without extra installs.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+SEED = 42
+
+INTENTIONAL_DEFAULTS = {
+    "clip_bounds": (-0.05, 0.05),  # deterministic clipping on lagged excess return
+    "tanh_scale": 1.0,  # scale before tanh
+    "zscore_window": 20,  # std window for lagged z-score
+    "zscore_clip": 5.0,  # limit for z-score truncation
+}
+INTENTIONAL_CFG = dict(INTENTIONAL_DEFAULTS)
+
+FEATURE_CFG_DEFAULT = {
+    "winsor_quantile": 0.995,  # bilateral clipping for highly skewed features
+    "skew_threshold": 3.0,  # apply winsor if |skew| >= threshold
+    "add_family_medians": True,
+    "add_ratios": True,  # mean/std and mean-median per family
+    "add_diffs": True,  # mean-std per family
+    "use_extended_set": True,  # expose set E_fe_oriented
+}
+
+
+def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[str]]:
+    sort_key = "date_id" if "date_id" in df.columns else None
+    df_sorted = df.sort_values(sort_key) if sort_key else df.copy()
+    if df_sorted.columns.has_duplicates:
+        df_sorted = df_sorted.loc[:, ~df_sorted.columns.duplicated()]
+    numeric_cols = df_sorted.select_dtypes(include=[np.number]).columns.tolist()
+    drop_cols = {target, "row_id", "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
+    for col in ["date_id", "is_scored"]:
+        if col in df_sorted.columns:
+            drop_cols.add(col)
+    feature_cols = [c for c in numeric_cols if c not in drop_cols]
+    feature_cols = [c for c in feature_cols if df_sorted[c].nunique() > 1]
+    return df_sorted, feature_cols
+
+
+def preprocess_basic(df: pd.DataFrame, feature_cols: list[str], ref_cols: list[str] | None = None) -> tuple[pd.DataFrame, list[str]]:
+    feature_cols = list(dict.fromkeys(feature_cols))
+    feature_frame = df.reindex(columns=feature_cols)
+    medians = feature_frame.median()
+    filled = feature_frame.fillna(medians).fillna(0)
+
+    missing_mask = feature_frame.isna()
+    if missing_mask.columns.has_duplicates:
+        missing_mask = missing_mask.loc[:, ~missing_mask.columns.duplicated()]
+    flag_source_cols = []
+    for c in feature_cols:
+        mask_c = missing_mask[c]
+        has_nan = mask_c.any().any() if isinstance(mask_c, pd.DataFrame) else bool(mask_c.any())
+        if has_nan:
+            flag_source_cols.append(c)
+    flags_df = None
+    if flag_source_cols:
+        flag_unique = list(dict.fromkeys(flag_source_cols))
+        flags_df = missing_mask[flag_unique].astype(int)
+        flags_df.columns = [f"{c}_was_nan" for c in flag_unique]
+
+    parts = [filled]
+    if flags_df is not None:
+        parts.append(flags_df)
+    df_proc = pd.concat(parts, axis=1)
+
+    if df_proc.columns.has_duplicates:
+        df_proc = df_proc.loc[:, ~df_proc.columns.duplicated()]
+    keep = [col for col in df_proc.columns if df_proc[col].std(ddof=0) > 1e-9]
+    out = df_proc[keep] if ref_cols is None else df_proc.reindex(columns=ref_cols, fill_value=0)
+    return out, list(out.columns)
+
+
+def time_split(df: pd.DataFrame, cutoff: float = 0.8) -> tuple[pd.DataFrame, pd.DataFrame]:
+    n = int(len(df) * cutoff)
+    return df.iloc[:n].copy(), df.iloc[n:].copy()
+
+
+def append_columns(df: pd.DataFrame, cols_dict: dict[str, pd.Series | np.ndarray | float | int]) -> pd.DataFrame:
+    """Concatenate derived columns uniquely to avoid fragmentation."""
+    if not cols_dict:
+        return df
+    new_df = pd.DataFrame(cols_dict, index=df.index)
+    combined = pd.concat([df, new_df], axis=1)
+    if combined.columns.has_duplicates:
+        combined = combined.loc[:, ~combined.columns.duplicated(keep="last")]
+    return combined
+
+
+def add_missing_columns(df: pd.DataFrame, columns: list[str], fill_value=np.nan) -> pd.DataFrame:
+    missing = [c for c in columns if c not in df.columns]
+    if not missing:
+        return df
+    filler = {c: fill_value for c in missing}
+    return append_columns(df, filler)
+
+
+def align_feature_frames(train_df: pd.DataFrame, other_df: pd.DataFrame | None, feature_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame | None, list[str]]:
+    """
+    Aligns columns between train/val/test before preprocess_basic:
+    - removes duplicates keeping the last occurrence;
+    - adds missing columns;
+    - drops features that are all-NaN or constant in the train.
+    """
+    cols_unique = list(dict.fromkeys(feature_cols))
+    train_clean = train_df.copy()
+    if train_clean.columns.has_duplicates:
+        train_clean = train_clean.loc[:, ~train_clean.columns.duplicated(keep="last")]
+
+    other_clean = None
+    if other_df is not None:
+        other_clean = other_df.copy()
+        if other_clean.columns.has_duplicates:
+            other_clean = other_clean.loc[:, ~other_clean.columns.duplicated(keep="last")]
+
+    train_clean = add_missing_columns(train_clean, cols_unique)
+    if other_clean is not None:
+        other_clean = add_missing_columns(other_clean, cols_unique)
+
+    valid_cols = []
+    for c in cols_unique:
+        series = train_clean[c]
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        if series.isna().all():
+            continue
+        if series.std(ddof=0) <= 1e-12:
+            continue
+        valid_cols.append(c)
+
+    train_clean = add_missing_columns(train_clean, valid_cols)
+    if other_clean is not None:
+        other_clean = add_missing_columns(other_clean, valid_cols)
+    return train_clean, other_clean, valid_cols
+
+
+def add_lagged_market_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds lagged_* columns to align train/test with lagged test features."""
+    if "date_id" not in df.columns:
+        return df
+    out = df.copy()
+    df_sorted = df.sort_values("date_id")
+    new_cols = {}
+
+    def add_shift(src_col: str, dest_col: str) -> None:
+        if dest_col in out.columns or src_col not in df_sorted.columns:
+            return
+        shifted = df_sorted[src_col].shift(1).reindex(df.index)
+        new_cols[dest_col] = shifted
+
+    add_shift("forward_returns", "lagged_forward_returns")
+    add_shift("risk_free_rate", "lagged_risk_free_rate")
+    add_shift("market_forward_excess_returns", "lagged_market_forward_excess_returns")
+    return append_columns(out, new_cols)
+
+
+def add_family_aggs(df: pd.DataFrame) -> pd.DataFrame:
+    df_out = df.copy()
+    fams = {g: [c for c in df_out.columns if c.startswith(g)] for g in ["M", "E", "I", "P", "V"]}
+    new_cols = {}
+    for fam, cols in fams.items():
+        cols = [c for c in cols if pd.api.types.is_numeric_dtype(df_out[c])]
+        if len(cols) >= 2:
+            new_cols[f"{fam}_mean"] = df_out[cols].mean(axis=1)
+            new_cols[f"{fam}_std"] = df_out[cols].std(axis=1)
+            new_cols[f"{fam}_median"] = df_out[cols].median(axis=1)
+    return append_columns(df_out, new_cols)
+
+
+def add_regime_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Creates regime features based on lagged market returns."""
+    if "date_id" not in df.columns:
+        return df
+    df_out = df.copy()
+    df_sorted = df.sort_values("date_id")
+    if "market_forward_excess_returns" in df_sorted.columns:
+        lagged_market = df_sorted["market_forward_excess_returns"].shift(1).reindex(df.index)
+        df_out["lagged_market_excess"] = lagged_market
+        df_out["regime_std_20"] = lagged_market.rolling(window=20, min_periods=5).std()
+        df_out["regime_high_vol"] = (df_out["regime_std_20"] > df_out["regime_std_20"].median()).astype(int)
+    return df_out
+
+
+def add_intentional_features(df: pd.DataFrame, intentional_cfg: dict | None = None) -> pd.DataFrame:
+    """Intentional/hand-crafted features (clip/tanh/zscore of lagged excess return)."""
+    cfg = dict(INTENTIONAL_DEFAULTS)
+    if intentional_cfg:
+        cfg.update(intentional_cfg)
+    df_out = df.copy()
+    if "market_forward_excess_returns" in df_out.columns:
+        df_sorted = df_out.sort_values("date_id") if "date_id" in df_out.columns else df_out
+        excess = df_sorted["market_forward_excess_returns"]
+        lagged_excess = excess.shift(1).reindex(df.index)
+        clip_lo, clip_hi = cfg.get("clip_bounds", (-0.05, 0.05))
+        clipped = lagged_excess.clip(clip_lo, clip_hi)
+        scaled = clipped * cfg.get("tanh_scale", 1.0)
+        df_out["lagged_excess_return"] = lagged_excess
+        df_out["lagged_excess_clip"] = clipped
+        df_out["lagged_excess_tanh"] = np.tanh(scaled)
+        window = cfg.get("zscore_window", 20)
+        if window and window > 1:
+            rolling_std = lagged_excess.rolling(window=window, min_periods=max(3, window // 2)).std()
+            z = (lagged_excess - lagged_excess.rolling(window=window, min_periods=max(3, window // 2)).mean()) / rolling_std.replace(0, np.nan)
+            z_clip = cfg.get("zscore_clip", None)
+            if z_clip:
+                z = z.clip(-z_clip, z_clip)
+            df_out["lagged_excess_z"] = z.fillna(0)
+    return df_out
+
+
+def winsorize_skewed_features(df: pd.DataFrame, target: str, fe_cfg: dict, fit_ref: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Bilateral winsor/clipping on highly skewed features. If fit_ref is provided, uses its quantiles."""
+    df_out = df.copy()
+    ref = df if fit_ref is None else fit_ref
+    q = fe_cfg.get("winsor_quantile")
+    skew_thr = fe_cfg.get("skew_threshold", 3.0)
+    if q is None or q <= 0.5 or q >= 1:
+        return df_out
+    drop_cols = {target, "row_id", "date_id", "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
+    num_cols = [c for c in ref.select_dtypes(include=[np.number]).columns if c not in drop_cols]
+    new_cols = {}
+
+    def _first_series(obj):
+        if isinstance(obj, pd.Series):
+            return obj
+        if isinstance(obj, pd.DataFrame):
+            return obj.iloc[:, 0]
+        return pd.Series(obj)
+
+    for col in num_cols:
+        if col not in df_out.columns:
+            continue
+        series_ref = _first_series(ref[col])
+        series = _first_series(df_out[col])
+        if series.std(ddof=0) <= 0 or series.isna().all():
+            continue
+        skew_val = series_ref.skew(skipna=True)
+        if np.isnan(skew_val) or abs(skew_val) < skew_thr:
+            continue
+        lo = series_ref.quantile(1 - q)
+        hi = series_ref.quantile(q)
+        new_cols[col] = series.clip(lo, hi)
+    return df_out.assign(**new_cols) if new_cols else df_out
+
+
+def add_ratio_diff_features(df: pd.DataFrame, fe_cfg: dict) -> pd.DataFrame:
+    """Adds simple ratios and differences between family aggregates."""
+    df_out = df.copy()
+    fams = ["M", "E", "I", "P", "V"]
+    new_cols = {}
+
+    def _to_series(obj):
+        if isinstance(obj, pd.DataFrame):
+            return obj.iloc[:, 0]
+        return obj
+
+    if fe_cfg.get("add_ratios", True) or fe_cfg.get("add_diffs", True):
+        for fam in fams:
+            mean_col = f"{fam}_mean"
+            std_col = f"{fam}_std"
+            median_col = f"{fam}_median"
+            if fe_cfg.get("add_ratios", True) and mean_col in df_out and std_col in df_out:
+                mean_ser = _to_series(df_out[mean_col])
+                std_ser = _to_series(df_out[std_col])
+                denom = std_ser.replace(0, np.nan)
+                new_cols[f"{fam}_mean_over_std"] = (mean_ser / denom).fillna(0)
+            if fe_cfg.get("add_diffs", True) and mean_col in df_out and std_col in df_out:
+                mean_ser = _to_series(df_out[mean_col])
+                std_ser = _to_series(df_out[std_col])
+                new_cols[f"{fam}_mean_minus_std"] = (mean_ser - std_ser).fillna(0)
+            if fe_cfg.get("add_ratios", True) and mean_col in df_out and median_col in df_out:
+                mean_ser = _to_series(df_out[mean_col])
+                med_ser = _to_series(df_out[median_col])
+                new_cols[f"{fam}_mean_minus_median"] = (mean_ser - med_ser).fillna(0)
+    return append_columns(df_out, new_cols)
+
+
+def apply_feature_engineering(df: pd.DataFrame, target: str, fe_cfg: dict | None = None, fit_ref: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Feature engineering pipeline (winsor + ratios/diffs). fit_ref allows applying train quantiles on val/test."""
+    cfg = dict(FEATURE_CFG_DEFAULT)
+    if fe_cfg:
+        cfg.update(fe_cfg)
+    df_out = df.copy()
+    df_out = winsorize_skewed_features(df_out, target, cfg, fit_ref=fit_ref)
+    df_out = add_ratio_diff_features(df_out, cfg)
+    return df_out
+
+
+def add_finance_combos(df: pd.DataFrame) -> pd.DataFrame:
+    """Simple factor combinations: spreads and interactions with risk/vol."""
+    df_out = df.copy()
+    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
+    new_cols = {}
+
+    def _to_series(obj):
+        if isinstance(obj, pd.DataFrame):
+            return obj.iloc[:, 0]
+        return obj
+
+    if "lagged_excess_return" in df_out.columns and "lagged_market_forward_excess_returns" in df_out.columns:
+        lhs = _to_series(df_out["lagged_excess_return"])
+        rhs = _to_series(df_out["lagged_market_forward_excess_returns"])
+        new_cols["lagged_excess_minus_market"] = lhs - rhs
+    if "lagged_market_forward_excess_returns" in df_out.columns and "risk_free_rate" in df_out.columns:
+        lhs = _to_series(df_out["lagged_market_forward_excess_returns"])
+        rhs = _to_series(df_out["risk_free_rate"])
+        new_cols["lagged_market_minus_rf"] = lhs - rhs
+    fam_pairs = [("M_mean", "V_mean"), ("P_mean", "E_mean")]
+    for a, b in fam_pairs:
+        if a in df_out.columns and b in df_out.columns:
+            lhs = _to_series(df_out[a])
+            rhs = _to_series(df_out[b])
+            new_cols[f"{a}_minus_{b}"] = lhs - rhs
+            denom = rhs.replace(0, np.nan)
+            new_cols[f"{a}_over_{b}"] = (lhs / denom).fillna(0)
+    return append_columns(df_out, new_cols)
+
+
+def add_cross_sectional_norms(df: pd.DataFrame) -> pd.DataFrame:
+    """Cross-sectional normalization per day for numeric columns (z-score per family)."""
+    if "date_id" not in df.columns:
+        return df
+    df_out = df.copy()
+    families = {g: [c for c in df_out.columns if c.startswith(g) and pd.api.types.is_numeric_dtype(df_out[c])] for g in ["M", "E", "I", "P", "V"]}
+    new_cols = {}
+    for fam, cols in families.items():
+        if not cols:
+            continue
+        grp = df_out.groupby("date_id")[cols]
+        mean = grp.transform("mean")
+        std = grp.transform("std").replace(0, np.nan)
+        new_cols.update({f"{c}_cs_z": ((df_out[c] - mean[c]) / std[c]).fillna(0) for c in cols})
+    return append_columns(df_out, new_cols)
+
+
+def add_surprise_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Surprise = deviation from rolling 5/20 mean of the feature (numeric columns)."""
+    if "date_id" not in df.columns:
+        return df
+    df_sorted = df.loc[:, ~df.columns.duplicated()].sort_values("date_id")
+    num_cols = [c for c in df_sorted.columns if pd.api.types.is_numeric_dtype(df_sorted[c]) and c not in {"date_id"}]
+    new_cols = {}
+    for col in num_cols:
+        series = df_sorted[col]
+        if series.isna().all():
+            continue
+        roll5 = series.rolling(window=5, min_periods=3).mean()
+        roll20 = series.rolling(window=20, min_periods=5).mean()
+        new_cols[f"{col}_surprise_5"] = (series - roll5).reindex(df.index)
+        new_cols[f"{col}_surprise_20"] = (series - roll20).reindex(df.index)
+    return append_columns(df, new_cols)
+
+
+def build_feature_sets(df: pd.DataFrame, target: str, intentional_cfg: dict | None = None, fe_cfg: dict | None = None, fit_ref: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+    df = df.loc[:, ~df.columns.duplicated()]
+    orig_numeric = df.select_dtypes(include=[np.number]).columns.tolist()
+    df_eng = add_lagged_market_features(df)
+    df_eng = add_family_aggs(df_eng)
+    df_eng = add_regime_features(df_eng)
+    df_eng = add_intentional_features(df_eng, intentional_cfg=intentional_cfg)
+    df_eng = apply_feature_engineering(df_eng, target, fe_cfg=fe_cfg, fit_ref=fit_ref)
+    df_eng = add_cross_sectional_norms(df_eng)
+    df_eng = add_surprise_features(df_eng)
+    df_eng = add_finance_combos(df_eng)
+    if df_eng.columns.has_duplicates:
+        df_eng = df_eng.loc[:, ~df_eng.columns.duplicated(keep="last")]
+    df_eng, all_cols = prepare_features(df_eng, target)
+
+    base_cols = [c for c in orig_numeric if c in all_cols]
+    if not base_cols:
+        base_cols = all_cols
+
+    agg_cols = [c for c in df_eng.columns if c.endswith("_mean") or c.endswith("_std")]
+    regime_cols = [c for c in df_eng.columns if c.startswith("regime_")]
+    intentional_cols = [c for c in df_eng.columns if any(k in c for k in ["lagged_excess_return", "lagged_market_excess", "_log1p", "_clip", "_tanh", "_z"])]
+
+    feature_sets = {
+        "A_baseline": sorted(set(base_cols)),
+        "B_families": sorted(set(base_cols + agg_cols)),
+        "C_regimes": sorted(set(base_cols + agg_cols + regime_cols)),
+        "D_intentional": sorted(set(base_cols + agg_cols + regime_cols + intentional_cols)),
+    }
+    cfg = FEATURE_CFG_DEFAULT if fe_cfg is None else fe_cfg
+    if cfg.get("use_extended_set", True):
+        oriented_cols = [c for c in all_cols if c not in feature_sets["D_intentional"]]
+        feature_sets["E_fe_oriented"] = sorted(set(feature_sets["D_intentional"] + oriented_cols))
+        new_cols = [c for c in all_cols if c not in feature_sets["E_fe_oriented"]]
+        feature_sets["F_v2_intentional"] = sorted(set(feature_sets["E_fe_oriented"] + new_cols))
+    return df_eng, feature_sets
+
+
+def make_features(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame | None = None,
+    target_col: str | None = None,
+    feature_set: str | None = None,
+    intentional_cfg: dict | None = None,
+    fe_cfg: dict | None = None,
+):
+    """
+    Unified feature pipeline for all flows (CV, diagnostics, final training):
+    - lags, family aggregations, regimes, intentional features;
+    - winsor/clipping, ratios/diffs, cross-section norms, surprise, finance combos;
+    - applies the same FE fit on test via fit_ref.
+    Returns engineered train/test frames, list of feature columns for the chosen set, and the feature_sets dict.
+    """
+    if target_col is None:
+        raise ValueError("target_col is required in make_features")
+    train_fe, feature_sets = build_feature_sets(train_df, target_col, intentional_cfg=intentional_cfg, fe_cfg=fe_cfg, fit_ref=None)
+    test_fe = None
+    if test_df is not None:
+        test_fe, _ = build_feature_sets(test_df, target_col, intentional_cfg=intentional_cfg, fe_cfg=fe_cfg, fit_ref=train_fe)
+    if feature_set is None:
+        feature_set = "D_intentional" if "D_intentional" in feature_sets else next(iter(feature_sets))
+    feature_cols = feature_sets.get(feature_set, next(iter(feature_sets.values())))
+    return train_fe, test_fe, feature_cols, feature_sets, feature_set
+
+
+def build_features(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame | None = None,
+    target_col: str | None = None,
+    feature_set: str | None = None,
+    intentional_cfg: dict | None = None,
+    fe_cfg: dict | None = None,
+):
+    """Alias for backward compatibility; delegates to make_features."""
+    return make_features(
+        train_df,
+        test_df=test_df,
+        target_col=target_col,
+        feature_set=feature_set,
+        intentional_cfg=intentional_cfg,
+        fe_cfg=fe_cfg,
+    )
+
+
+__all__ = [
+    "INTENTIONAL_DEFAULTS",
+    "INTENTIONAL_CFG",
+    "FEATURE_CFG_DEFAULT",
+    "prepare_features",
+    "preprocess_basic",
+    "time_split",
+    "append_columns",
+    "add_missing_columns",
+    "align_feature_frames",
+    "add_lagged_market_features",
+    "add_family_aggs",
+    "add_regime_features",
+    "add_intentional_features",
+    "winsorize_skewed_features",
+    "add_ratio_diff_features",
+    "apply_feature_engineering",
+    "add_finance_combos",
+    "add_cross_sectional_norms",
+    "add_surprise_features",
+    "build_feature_sets",
+    "make_features",
+    "build_features",
+]''')
+HULL_FEATURES_PATH = Path('hull_features.py')
+HULL_FEATURES_PATH.write_text(HULL_FEATURES_CODE)
+print(f"hull_features.py materializado em {HULL_FEATURES_PATH.resolve()}")
+
+# %%
+sys.path.insert(0, '.')
+from hull_features import *  # noqa: F401,F403
+
 def evaluate_baselines(train_df, feature_cols, target_col):
     """Baselines simples em split 80/20: alocação constante e modelo linear (Ridge)."""
     tr, va = time_split(train_df, cutoff=0.8)
-    tr_proc, keep_cols = preprocess_basic(tr, feature_cols)
-    va_proc, _ = preprocess_basic(va, feature_cols, ref_cols=keep_cols)
+    tr_aligned, va_aligned, cols_use = align_feature_frames(tr, va, feature_cols)
+    tr_proc, keep_cols = preprocess_basic(tr_aligned, cols_use)
+    va_proc, _ = preprocess_basic(va_aligned, cols_use, ref_cols=keep_cols)
 
     X_tr = tr_proc.drop(columns=[target_col], errors="ignore")
     X_va = va_proc.drop(columns=[target_col], errors="ignore")
@@ -1190,10 +1738,14 @@ def time_cv_lightgbm_fitref(
         df_tr_fe, fs_tr = build_feature_sets(
             df_tr, target_col, intentional_cfg=INTENTIONAL_CFG, fe_cfg=FEATURE_CFG_DEFAULT, fit_ref=df_tr
         )
+        if df_tr_fe.columns.has_duplicates:
+            df_tr_fe = df_tr_fe.loc[:, ~df_tr_fe.columns.duplicated(keep="last")]
         cols = fs_tr.get(feature_set_name, next(iter(fs_tr.values())))
         df_val_fe, _ = build_feature_sets(
             df_val, target_col, intentional_cfg=INTENTIONAL_CFG, fe_cfg=FEATURE_CFG_DEFAULT, fit_ref=df_tr
         )
+        if df_val_fe.columns.has_duplicates:
+            df_val_fe = df_val_fe.loc[:, ~df_val_fe.columns.duplicated(keep="last")]
         df_val_fe = df_val_fe.reindex(columns=df_tr_fe.columns, fill_value=0)
 
         X_tr = df_tr_fe[cols]
@@ -1476,16 +2028,17 @@ def time_cv_lightgbm(
                 print(f"{prefix}Fold {i}: treino ficou vazio após filtrar is_scored==1; pulando.")
                 continue
 
-        df_tr_proc, keep_cols = preprocess_basic(df_tr, feature_cols)
-        df_val_proc, _ = preprocess_basic(df_val, feature_cols, ref_cols=keep_cols)
+        df_tr_aligned, df_val_aligned, cols_use = align_feature_frames(df_tr, df_val, feature_cols)
+        df_tr_proc, keep_cols = preprocess_basic(df_tr_aligned, cols_use)
+        df_val_proc, _ = preprocess_basic(df_val_aligned, cols_use, ref_cols=keep_cols)
 
         X_tr = df_tr_proc.drop(columns=[target_col], errors="ignore")
         y_tr = df_tr[target_col]
         X_val = df_val_proc.drop(columns=[target_col], errors="ignore")
         y_val = df_val[target_col]
 
-        train_weight = make_sample_weight(df_tr, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
-        val_weight = make_sample_weight(df_val, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
+        train_weight = make_sample_weight(df_tr_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
+        val_weight = make_sample_weight(df_val_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
         train_ds = lgb.Dataset(X_tr, label=y_tr, weight=train_weight)
         val_ds = lgb.Dataset(X_val, label=y_val, weight=val_weight, reference=train_ds)
         params = dict(BEST_PARAMS)
@@ -1597,8 +2150,9 @@ def summarize_cv_metrics(metrics):
 
 
 def make_sample_weight(df, weight_scored=1.0, weight_unscored=0.2):
+    weight_uns = weight_scored if weight_unscored is None else weight_unscored
     if IS_SCORED_COL and IS_SCORED_COL in df.columns:
-        return df[IS_SCORED_COL].map({1: weight_scored, 0: weight_unscored}).fillna(weight_unscored).to_numpy()
+        return df[IS_SCORED_COL].map({1: weight_scored, 0: weight_uns}).fillna(weight_uns).to_numpy()
     return np.ones(len(df)) * weight_scored
 
 
@@ -1676,15 +2230,16 @@ def run_cv_preds(
             df_tr = df_tr.loc[df_tr[IS_SCORED_COL] == 1]
             if df_tr.empty:
                 continue
-        df_tr_proc, keep_cols = preprocess_basic(df_tr, feature_cols)
-        df_val_proc, _ = preprocess_basic(df_val, feature_cols, ref_cols=keep_cols)
+        df_tr_aligned, df_val_aligned, cols_use = align_feature_frames(df_tr, df_val, feature_cols)
+        df_tr_proc, keep_cols = preprocess_basic(df_tr_aligned, cols_use)
+        df_val_proc, _ = preprocess_basic(df_val_aligned, cols_use, ref_cols=keep_cols)
         X_tr = df_tr_proc.drop(columns=[target_col], errors="ignore")
         y_tr = df_tr[target_col]
         X_val = df_val_proc.drop(columns=[target_col], errors="ignore")
         y_val = df_val[target_col]
 
-        train_weight = make_sample_weight(df_tr, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
-        val_weight = make_sample_weight(df_val, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
+        train_weight = make_sample_weight(df_tr_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
+        val_weight = make_sample_weight(df_val_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
         if model_kind == "lgb":
             params_use = dict(BEST_PARAMS)
             if params:
@@ -1884,8 +2439,13 @@ if not intentional_folds_df.empty:
 
 # %%
 # Executa CV temporal usando pipeline unificado de features
-train_fe_all, test_fe_all, feature_cols_main, feature_sets, main_feature_set = build_features(
-    train, test, target_col, feature_set="D_intentional", intentional_cfg=INTENTIONAL_CFG, fe_cfg=FEATURE_CFG_DEFAULT
+train_fe_all, test_fe_all, feature_cols_main, feature_sets, main_feature_set = make_features(
+    train,
+    test_df=test,
+    target_col=target_col,
+    feature_set="D_intentional",
+    intentional_cfg=INTENTIONAL_CFG,
+    fe_cfg=FEATURE_CFG_DEFAULT,
 )
 _df = train_fe_all
 # Contagem de features por set
@@ -1958,8 +2518,9 @@ else:
 
 # %%
 print("\n=== CV LGBM ponderado por is_scored (peso_non_scored=0.2) ===")
+feature_cols_weighted = feature_sets.get("D_intentional") or feature_cols_cv
 metrics_weighted = time_cv_lightgbm_weighted(
-    _df, feature_cols_cv, target_col, n_splits=4, val_frac=0.12, num_boost_round=180, weight_scored=1.0, weight_unscored=0.2
+    _df, feature_cols_weighted, target_col, n_splits=4, val_frac=0.12, num_boost_round=180, weight_scored=1.0, weight_unscored=0.2
 )
 if metrics_weighted:
     print(f"Sharpe médio (weighted): {np.mean([m['sharpe'] for m in metrics_weighted]):.4f}")
@@ -2036,13 +2597,62 @@ else:
     print("CV ausente para algum dos conjuntos (C_regimes ou D_intentional). Rode as células de CV primeiro.")
 
 # %% [markdown]
-# ### Treino scored vs. ponderado (is_scored)
+# ### Pseudo-leaderboard / holdout temporal (expanding window)
+# - Checa desempenho em um bloco final do histórico (10–15%) como proxy de LB pública.
+# - Compara treino completo vs. treino filtrado em `is_scored==1` nas avaliações.
+
+# %%
+def expanding_holdout_eval(
+    df, feature_cols, target, holdout_frac=0.12, train_only_scored=False, label="holdout", use_weights=False, weight_unscored=0.2
+):
+    if "date_id" in df.columns:
+        df_sorted = df.sort_values("date_id")
+    else:
+        df_sorted = df.copy()
+    n_hold = max(1, int(len(df_sorted) * holdout_frac))
+    train_part = df_sorted.iloc[:-n_hold]
+    holdout_part = df_sorted.iloc[-n_hold:]
+    if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in train_part.columns:
+        train_part = train_part.loc[train_part[IS_SCORED_COL] == 1]
+    if len(train_part) == 0 or len(holdout_part) == 0:
+        return None
+
+    train_aligned, holdout_aligned, cols_use = align_feature_frames(train_part, holdout_part, feature_cols)
+    tr_proc, keep_cols = preprocess_basic(train_aligned, cols_use)
+    ho_proc, _ = preprocess_basic(holdout_aligned, cols_use, ref_cols=keep_cols)
+    X_tr = tr_proc.drop(columns=[target], errors="ignore")
+    y_tr = train_part[target]
+    X_ho = ho_proc.drop(columns=[target], errors="ignore")
+
+    train_weight = make_sample_weight(train_aligned, weight_scored=1.0, weight_unscored=weight_unscored) if use_weights else None
+    params = {"objective": "regression", "metric": "rmse", **BEST_PARAMS}
+    model = lgb.train(params, lgb.Dataset(X_tr, label=y_tr, weight=train_weight), num_boost_round=200)
+    pred_ho = model.predict(X_ho)
+    best_k, best_alpha, _ = optimize_allocation_scale(pred_ho, holdout_part, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL)
+    alloc_ho = map_return_to_alloc(pred_ho, k=best_k, intercept=best_alpha)
+    sharpe_ho, details = adjusted_sharpe_score(
+        holdout_part, alloc_ho, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+    )
+    return {
+        "label": label,
+        "holdout_frac": holdout_frac,
+        "train_only_scored": train_only_scored,
+        "sharpe_holdout": sharpe_ho,
+        "k_best": best_k,
+        "alpha_best": best_alpha,
+        "n_train": len(train_part),
+        "n_holdout": len(holdout_part),
+        "n_scored_holdout": int(holdout_part[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in holdout_part.columns else len(holdout_part),
+        "weight_unscored": weight_unscored if use_weights else None,
+    }
+
+# %% [markdown]
+# ### Treino scored vs. ponderado (is_scored) – comparação clara (full vs. scored_only vs. weighted)
 
 # %%
 is_scored_configs = [
     {"name": "full", "train_only_scored": False, "weight_unscored": 1.0},
     {"name": "weighted_0.2", "train_only_scored": False, "weight_unscored": 0.2},
-    {"name": "weighted_0.1", "train_only_scored": False, "weight_unscored": 0.1},
     {"name": "scored_only", "train_only_scored": True, "weight_unscored": None},
 ]
 
@@ -2097,6 +2707,35 @@ is_scored_df = pd.DataFrame(is_scored_results)
 if not is_scored_df.empty:
     display(is_scored_df.sort_values("holdout12_sharpe", ascending=False))
 
+
+def choose_scored_strategy(results_df, cfg_lookup, fallback="weighted_0.2"):
+    if results_df is None or results_df.empty:
+        cfg = cfg_lookup.get(fallback, {"train_only_scored": False, "weight_unscored": 1.0})
+        return {**cfg, "name": fallback, "holdout_combo": np.nan, "cv_mean": np.nan, "note": "fallback (sem métricas de comparação)"}
+    eval_df = results_df.copy()
+    eval_df["holdout_combo"] = eval_df[["holdout12_sharpe", "holdout15_sharpe"]].mean(axis=1)
+    eval_df["holdout_combo"] = eval_df["holdout_combo"].fillna(-np.inf)
+    eval_df["cv_sharpe_mean"] = eval_df["cv_sharpe_mean"].fillna(-np.inf)
+    eval_df = eval_df.sort_values(by=["holdout_combo", "cv_sharpe_mean"], ascending=False)
+    best = eval_df.iloc[0]
+    cfg = cfg_lookup.get(best["config"], cfg_lookup.get(fallback, {"train_only_scored": False, "weight_unscored": 1.0}))
+    note = f"holdout≈{best['holdout_combo']:.4f}, cv≈{best['cv_sharpe_mean']:.4f}, cfg={best['config']}"
+    return {
+        **cfg,
+        "name": best["config"],
+        "holdout_combo": float(best["holdout_combo"]),
+        "cv_mean": float(best["cv_sharpe_mean"]),
+        "note": note,
+    }
+
+
+is_scored_cfg_lookup = {c["name"]: c for c in is_scored_configs}
+chosen_scored_cfg = choose_scored_strategy(is_scored_df, is_scored_cfg_lookup)
+print(
+    f"Estratégia escolhida para treino final: {chosen_scored_cfg['name']} | train_only_scored={chosen_scored_cfg['train_only_scored']} | "
+    f"weight_unscored={chosen_scored_cfg.get('weight_unscored')} | {chosen_scored_cfg['note']}"
+)
+
 # %% [markdown]
 # ## 9. Baselines simples (constante e linear)
 
@@ -2125,8 +2764,9 @@ feature_cols_best = feature_sets.get(best_set, feature_sets["A_baseline"])
 print(f"Baseline 80/20 usando feature set: {best_set} ({len(feature_cols_best)} cols)")
 
 train_df, val_df = time_split(_df, cutoff=0.8)
-train_df_proc, keep_cols = preprocess_basic(train_df, feature_cols_best)
-val_df_proc, _ = preprocess_basic(val_df, feature_cols_best, ref_cols=keep_cols)
+train_aligned, val_aligned, cols_use = align_feature_frames(train_df, val_df, feature_cols_best)
+train_df_proc, keep_cols = preprocess_basic(train_aligned, cols_use)
+val_df_proc, _ = preprocess_basic(val_aligned, cols_use, ref_cols=keep_cols)
 
 X_train = train_df_proc.drop(columns=[target_col], errors="ignore")
 X_val = val_df_proc.drop(columns=[target_col], errors="ignore")
@@ -2437,40 +3077,61 @@ def train_full_and_predict_model(
     alloc_k=None,
     alloc_alpha=1.0,
     intentional_cfg=None,
+    fe_cfg=None,
     seed=None,
     train_only_scored=False,
     weight_scored=None,
     weight_unscored=None,
     df_train_fe=None,
     df_test_fe=None,
+    feature_set=None,
 ):
-    """Aplica pipeline de features, treina modelo especificado e retorna alocação."""
+    """Aplica pipeline de features compartilhado com a CV (via make_features), treina modelo especificado e retorna alocação."""
     seed_use = SEED if seed is None else seed
     np.random.seed(seed_use)
+    fe_cfg_use = FEATURE_CFG_DEFAULT if fe_cfg is None else fe_cfg
+    feature_cols_use = list(feature_cols) if feature_cols is not None else None
     use_weights = weight_scored is not None or weight_unscored is not None
     weight_scored = 1.0 if weight_scored is None else weight_scored
     weight_unscored = 1.0 if weight_unscored is None else weight_unscored
+    df_train_raw = df_train.copy()
     df_train_base = df_train_fe.copy() if df_train_fe is not None else None
     df_test_base = df_test_fe.copy() if df_test_fe is not None else None
 
-    df_train_raw = df_train.copy()
-    if df_train_base is None:
-        df_train_base, _ = build_feature_sets(df_train_raw, target_col, intentional_cfg=intentional_cfg, fe_cfg=FEATURE_CFG_DEFAULT)
-    if df_test_base is None:
-        df_test_base, _ = build_feature_sets(
-            df_test, target_col, intentional_cfg=intentional_cfg, fe_cfg=FEATURE_CFG_DEFAULT, fit_ref=df_train_base
+    needs_features = df_train_base is None or (df_test is not None and df_test_base is None)
+    if not needs_features and feature_cols_use is not None:
+        missing_train = [c for c in feature_cols_use if c not in df_train_base.columns]
+        missing_test = [c for c in feature_cols_use if df_test_base is not None and c not in df_test_base.columns]
+        needs_features = bool(missing_train or missing_test)
+
+    if needs_features or feature_cols_use is None:
+        gen_train_fe, gen_test_fe, cols_gen, feature_sets_gen, feature_set_gen = make_features(
+            df_train_raw,
+            test_df=df_test,
+            target_col=target_col,
+            feature_set=feature_set,
+            intentional_cfg=intentional_cfg,
+            fe_cfg=fe_cfg_use,
         )
+        df_train_base = gen_train_fe
+        df_test_base = gen_test_fe if gen_test_fe is not None else (df_test.copy() if df_test is not None else None)
+        chosen_set = feature_set or feature_set_gen
+        feature_cols_from_set = feature_sets_gen.get(chosen_set) if feature_sets_gen else None
+        if feature_cols_use is None or needs_features:
+            feature_cols_use = feature_cols_from_set or cols_gen
+
+    if df_test_base is None and df_test is not None:
+        df_test_base = df_test.copy()
 
     if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in df_train_base.columns:
         mask_scored = df_train_base[IS_SCORED_COL] == 1
         df_train_base = df_train_base.loc[mask_scored]
         df_train_raw = df_train_raw.loc[mask_scored]
 
-    df_train_base = add_missing_columns(df_train_base, feature_cols)
-    df_test_base = add_missing_columns(df_test_base, feature_cols)
+    df_train_base, df_test_base, feature_cols_aligned = align_feature_frames(df_train_base, df_test_base, feature_cols_use)
 
-    df_train_proc, keep_cols = preprocess_basic(df_train_base, feature_cols)
-    df_test_proc, _ = preprocess_basic(df_test_base, feature_cols, ref_cols=keep_cols)
+    df_train_proc, keep_cols = preprocess_basic(df_train_base, feature_cols_aligned)
+    df_test_proc, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols)
     X_tr = df_train_proc.drop(columns=[target_col], errors="ignore")
     y_tr = df_train_raw.loc[df_train_proc.index, target_col]
     X_te = df_test_proc.drop(columns=[target_col], errors="ignore")
@@ -2559,8 +3220,13 @@ if cv_metrics.get(best_set):
         best_k_global = float(np.median(k_candidates))
     # alpha fica fixo em 1.0 para a regra 1 + k*pred; mantemos k da calibração CV ou mediana dos folds.
 print(f"Treino final usando feature set: {best_set} ({len(feature_cols_submit)} cols) | alpha={best_alpha_global:.2f} | k_aloc={best_k_global:.2f}")
-FINAL_TRAIN_ONLY_SCORED = False  # troque para True se quiser treinar só em is_scored==1
-FINAL_WEIGHT_UNSCORED = 0.1  # peso reduzido para linhas não pontuadas; mantenha 1.0 para scored
+FINAL_TRAIN_ONLY_SCORED = bool(chosen_scored_cfg.get("train_only_scored", False))
+FINAL_WEIGHT_UNSCORED = chosen_scored_cfg.get("weight_unscored", 1.0)
+FINAL_SCORING_NOTE = chosen_scored_cfg.get("note", "")
+print(
+    f"Estrategia is_scored para treino final: {chosen_scored_cfg.get('name')} | "
+    f"train_only_scored={FINAL_TRAIN_ONLY_SCORED} | weight_unscored={FINAL_WEIGHT_UNSCORED}"
+)
 
 allocations = {}
 # Pré-computa features consistentes com o pipeline da CV para treino+teste
@@ -2579,7 +3245,9 @@ for seed_val in bagging_seeds:
         alloc_k=best_k_global,
         alloc_alpha=best_alpha_global,
         intentional_cfg=INTENTIONAL_CFG,
+        fe_cfg=FEATURE_CFG_DEFAULT,
         seed=seed_val,
+        feature_set=best_set,
         df_train_fe=train_fe_submit,
         df_test_fe=test_fe_submit,
         weight_scored=1.0,
@@ -2599,6 +3267,8 @@ else:
         alloc_k=best_k_global,
         alloc_alpha=best_alpha_global,
         intentional_cfg=INTENTIONAL_CFG,
+        fe_cfg=FEATURE_CFG_DEFAULT,
+        feature_set=best_set,
         df_train_fe=train_fe_submit,
         df_test_fe=test_fe_submit,
         weight_scored=1.0,
@@ -2617,6 +3287,8 @@ allocations["lgb_conservative"] = train_full_and_predict_model(
     alloc_k=best_k_global,
     alloc_alpha=best_alpha_global,
     intentional_cfg=INTENTIONAL_CFG,
+    fe_cfg=FEATURE_CFG_DEFAULT,
+    feature_set=best_set,
     df_train_fe=train_fe_submit,
     df_test_fe=test_fe_submit,
     weight_scored=1.0,
@@ -2634,6 +3306,8 @@ allocations["ridge"] = train_full_and_predict_model(
     alloc_k=best_k_global,
     alloc_alpha=best_alpha_global,
     intentional_cfg=INTENTIONAL_CFG,
+    fe_cfg=FEATURE_CFG_DEFAULT,
+    feature_set=best_set,
     df_train_fe=train_fe_submit,
     df_test_fe=test_fe_submit,
     weight_scored=1.0,
@@ -2669,9 +3343,13 @@ final_submission_summary = {
     "best_feature_set": best_set,
     "k_allocation": best_k_global,
     "alpha_allocation": best_alpha_global,
+    "train_strategy_name": chosen_scored_cfg.get("name"),
     "models_used": list(allocations.keys()),
     "blend_used": "blend_weighted" if "blend_weighted" in alloc_df.columns else "blend_mean",
     "submission_path": str(sub_path.resolve()),
+    "train_only_scored": FINAL_TRAIN_ONLY_SCORED,
+    "weight_unscored": FINAL_WEIGHT_UNSCORED,
+    "train_strategy_note": FINAL_SCORING_NOTE,
 }
 print("Resumo final:", final_submission_summary)
 
@@ -2709,6 +3387,23 @@ def add_exp_log(
             "params": params,
             "notes": notes,
         }
+    )
+
+
+if "chosen_scored_cfg" in locals():
+    holdout_combo = chosen_scored_cfg.get("holdout_combo", np.nan)
+    holdout_combo = float(holdout_combo) if np.isfinite(holdout_combo) else np.nan
+    add_exp_log(
+        experiments_log,
+        exp_id=f"train_strategy_{chosen_scored_cfg.get('name', 'unknown')}",
+        feature_set=best_set,
+        model="train_vs_scored",
+        sharpe_mean=holdout_combo,
+        sharpe_std=0.0,
+        n_splits=len(cv_metrics.get(best_set, [])),
+        val_frac=0.10,
+        params=f"train_only_scored={FINAL_TRAIN_ONLY_SCORED}, weight_unscored={FINAL_WEIGHT_UNSCORED}",
+        notes=FINAL_SCORING_NOTE,
     )
 if metrics_const:
     const_vals = [m["sharpe"] for m in metrics_const]
@@ -2894,56 +3589,6 @@ if blend_stats:
             notes="Resumo final antes de LB",
         )
 
-# %% [markdown]
-# ### Pseudo-leaderboard / holdout temporal (expanding window)
-# - Checa desempenho em um bloco final do histórico (10–15%) como proxy de LB pública.
-# - Compara treino completo vs. treino filtrado em `is_scored==1` nas avaliações.
-
-# %%
-def expanding_holdout_eval(
-    df, feature_cols, target, holdout_frac=0.12, train_only_scored=False, label="holdout", use_weights=False, weight_unscored=0.2
-):
-    if "date_id" in df.columns:
-        df_sorted = df.sort_values("date_id")
-    else:
-        df_sorted = df.copy()
-    n_hold = max(1, int(len(df_sorted) * holdout_frac))
-    train_part = df_sorted.iloc[:-n_hold]
-    holdout_part = df_sorted.iloc[-n_hold:]
-    if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in train_part.columns:
-        train_part = train_part.loc[train_part[IS_SCORED_COL] == 1]
-    if len(train_part) == 0 or len(holdout_part) == 0:
-        return None
-
-    tr_proc, keep_cols = preprocess_basic(train_part, feature_cols)
-    ho_proc, _ = preprocess_basic(holdout_part, feature_cols, ref_cols=keep_cols)
-    X_tr = tr_proc.drop(columns=[target], errors="ignore")
-    y_tr = train_part[target]
-    X_ho = ho_proc.drop(columns=[target], errors="ignore")
-
-    train_weight = make_sample_weight(train_part, weight_scored=1.0, weight_unscored=weight_unscored) if use_weights else None
-    params = {"objective": "regression", "metric": "rmse", **BEST_PARAMS}
-    model = lgb.train(params, lgb.Dataset(X_tr, label=y_tr, weight=train_weight), num_boost_round=200)
-    pred_ho = model.predict(X_ho)
-    best_k, best_alpha, _ = optimize_allocation_scale(pred_ho, holdout_part, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL)
-    alloc_ho = map_return_to_alloc(pred_ho, k=best_k, intercept=best_alpha)
-    sharpe_ho, details = adjusted_sharpe_score(
-        holdout_part, alloc_ho, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
-    )
-    return {
-        "label": label,
-        "holdout_frac": holdout_frac,
-        "train_only_scored": train_only_scored,
-        "sharpe_holdout": sharpe_ho,
-        "k_best": best_k,
-        "alpha_best": best_alpha,
-        "n_train": len(train_part),
-        "n_holdout": len(holdout_part),
-        "n_scored_holdout": int(holdout_part[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in holdout_part.columns else len(holdout_part),
-        "weight_unscored": weight_unscored if use_weights else None,
-    }
-
-
 holdout_results = []
 holdout_results.append(expanding_holdout_eval(_df, feature_cols_cv, target_col, holdout_frac=0.12, train_only_scored=False, label="holdout_12"))
 holdout_results.append(expanding_holdout_eval(_df, feature_cols_cv, target_col, holdout_frac=0.15, train_only_scored=False, label="holdout_15"))
@@ -3116,25 +3761,32 @@ else:
 # Splits alternativos para estabilidade (cutoffs simples)
 for cutoff in [0.7, 0.8]:
     tr_alt, va_alt = time_split(_df, cutoff=cutoff)
-    tr_proc, keep_cols = preprocess_basic(tr_alt, feature_cols)
-    va_proc, _ = preprocess_basic(va_alt, feature_cols, ref_cols=keep_cols)
+    tr_alt_aligned, va_alt_aligned, cols_use = align_feature_frames(tr_alt, va_alt, feature_cols)
+    tr_proc, keep_cols = preprocess_basic(tr_alt_aligned, cols_use)
+    va_proc, _ = preprocess_basic(va_alt_aligned, cols_use, ref_cols=keep_cols)
     X_tr = tr_proc.drop(columns=[target_col], errors="ignore")
-    y_tr = tr_alt[target_col]
+    y_tr = tr_alt_aligned[target_col]
     X_va = va_proc.drop(columns=[target_col], errors="ignore")
-    y_va = va_alt[target_col]
+    y_va = va_alt_aligned[target_col]
     model = lgb.LGBMRegressor(**BEST_PARAMS, n_estimators=250, random_state=SEED)
     model.fit(X_tr, y_tr)
     pred_va = model.predict(X_va)
     best_k_va, best_alpha_va, _ = optimize_allocation_scale(
-        pred_va, va_alt, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+        pred_va, va_alt_aligned, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
     )
     alloc_va = map_return_to_alloc(pred_va, k=best_k_va, intercept=best_alpha_va)
     sharpe_va, details_va = adjusted_sharpe_score(
-        va_alt, pd.Series(alloc_va, index=va_alt.index), market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+        va_alt_aligned,
+        pd.Series(alloc_va, index=va_alt_aligned.index),
+        market_col=MARKET_COL,
+        rf_col=RF_COL,
+        is_scored_col=IS_SCORED_COL,
     )
-    n_scored_va = int(va_alt[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in va_alt.columns else len(va_alt)
+    n_scored_va = (
+        int(va_alt_aligned[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in va_alt_aligned.columns else len(va_alt_aligned)
+    )
     print(
-        f"Cutoff {int(cutoff*100)}/{int((1-cutoff)*100)}: Sharpe_adj={sharpe_va:.4f} | alpha={best_alpha_va:.2f} | k={best_k_va:.2f} | n_scored={n_scored_va}/{len(va_alt)}"
+        f"Cutoff {int(cutoff*100)}/{int((1-cutoff)*100)}: Sharpe_adj={sharpe_va:.4f} | alpha={best_alpha_va:.2f} | k={best_k_va:.2f} | n_scored={n_scored_va}/{len(va_alt_aligned)}"
     )
 
 
