@@ -17,7 +17,22 @@
   - [x] Revisar CV/treino LGBM para incluir pesos em `is_scored` e variante train_only_scored quando aplicável.
   - [x] Fortalecer bloco do Optuna focando 4–5 hiperparâmetros-chave, trials ~40, e deixar `study.optimize` pronto para uso.
   - [x] Incluir variantes LGBM (conservadora/weighted) no pipeline de CV/ensemble e refletir no treino final/submissão.
-  - [ ] Sincronizar notebook `.py` ↔ `.ipynb` com `jupytext --sync` após ajustes.
+  - [x] Sincronizar notebook `.py` ↔ `.ipynb` com `jupytext --sync` após ajustes.
+- [ ] Treino final — scored vs não scored
+  - [x] Comparar três variantes no holdout/CV: (1) treino full; (2) `train_only_scored=True`; (3) pesos `weight_scored=1`, `weight_unscored=0.2` no fit.
+  - [x] Escolher a variante que melhor alinha CV e holdout (Sharpe mod/vol) e aplicar também no `train_full_and_predict_model`.
+  - [x] Documentar decisão e checagens (incluindo o porquê da escolha) no diário/observações do notebook.
+- [x] Pipeline único CV ↔ treino final
+  - [x] Extrair função única `make_features(train, test, target, intentional_cfg, fe_cfg)` para aplicar o pipeline completo (lags → agregações → regimes → intencionais → winsor/ratios → normas cross-section → surprise → combos) com `fit_ref`.
+  - [x] Usar essa função em todas as rotas (CV principal, diagnósticos/baselines, treino final/submissão) em vez de pipelines paralelos.
+  - [x] Garantir alinhamento de colunas entre train/test e ausência de NaN/constantes inesperadas antes do `preprocess_basic`.
+  - [x] 3.2: reforçar uso único do pipeline de features no treino final (gerar/regarantir colunas com `make_features` quando faltarem).
+- [x] Ajustar chamadas do treino final/submissão para usar `feature_set`/`fe_cfg` consistentes com a CV.
+  - [x] Sincronizar notebook `.py` ↔ `.ipynb` após o ajuste.
+- [x] Modularização Kaggle-safe
+  - [x] Extrair helpers de feature/preprocess para `src/hull_features.py`.
+  - [x] Materializar/importar `hull_features.py` dentro do notebook (compatível com Kaggle offline).
+  - [x] Validar com `py_compile` + `jupytext --sync`.
 - [ ] Corrigir CV fit_ref (ValueError em prepare_features)
-  - [ ] Identificar e remover/deduplicar colunas que ainda chegam duplicadas no fluxo do `time_cv_lightgbm_fitref`/`build_feature_sets`, evitando que `df_sorted[c]` retorne DataFrame e gere “truth value of a Series is ambiguous”.
-  - [ ] Validar `time_cv_lightgbm_fitref` rodando sem erros com o feature set `D_intentional` após o ajuste.
+  - [x] Identificar e remover/deduplicar colunas que ainda chegam duplicadas no fluxo do `time_cv_lightgbm_fitref`/`build_feature_sets`, evitando que `df_sorted[c]` retorne DataFrame e gere “truth value of a Series is ambiguous”.
+  - [x] Validar `time_cv_lightgbm_fitref` rodando sem erros com o feature set `D_intentional` após o ajuste (ajuste aplicado; rodar a célula para confirmar em runtime).
