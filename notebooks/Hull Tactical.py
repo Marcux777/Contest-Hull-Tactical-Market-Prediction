@@ -1235,6 +1235,78 @@ def run_pipeline_allocations(feature_set: str = PIPELINE_FEATURE_SET, cfg=None):
     )
 
 # %% [markdown]
+# ## 7. EDA focada na métrica (Sharpe)
+# - Série do alvo e volatilidade rolling para achar regimes.
+# - Baseline de alocação constante (posição=1) usando a métrica oficial.
+# - Buracos de dados por data_id e por família de features, além de colinearidade intra-família.
+
+# %%
+hm.set_data_columns(MARKET_COL, RF_COL, IS_SCORED_COL)
+
+# Série do alvo e vol rolling
+if "date_id" in train.columns:
+    df_sorted = train.sort_values("date_id")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(df_sorted["date_id"], df_sorted[TARGET_COL], color="#4C72B0")
+    axes[0].set_title("Alvo ao longo do tempo")
+    axes[0].set_xlabel("date_id")
+    axes[0].set_ylabel(TARGET_COL)
+    roll20 = df_sorted[TARGET_COL].rolling(window=20, min_periods=10).std()
+    roll60 = df_sorted[TARGET_COL].rolling(window=60, min_periods=20).std()
+    axes[1].plot(df_sorted["date_id"], roll20, label="vol_20d", color="#55A868")
+    axes[1].plot(df_sorted["date_id"], roll60, label="vol_60d", color="#C44E52")
+    axes[1].set_title("Volatilidade rolling (20/60)")
+    axes[1].legend()
+    plt.tight_layout()
+    plt.show()
+
+# Baseline: posição constante = 1 (buy & hold)
+alloc_const = pd.Series(1.0, index=train.index)
+sharpe_const, details_const = hm.adjusted_sharpe_score(
+    train,
+    alloc_const,
+    market_col=MARKET_COL,
+    rf_col=RF_COL,
+    is_scored_col=IS_SCORED_COL,
+)
+print(f"Sharpe ajustado (alloc=1 constante): {sharpe_const:.4f} | vol estratégia={details_const.get('strategy_vol'):.4f}")
+
+# Proporção de linhas scored (se existir)
+if IS_SCORED_COL and IS_SCORED_COL in train.columns and "date_id" in train.columns:
+    scored_by_date = train.groupby("date_id")[IS_SCORED_COL].mean()
+    scored_by_date.plot(figsize=(10, 2.8), title="Proporção is_scored por date_id")
+    plt.tight_layout()
+    plt.show()
+
+# Missing por data e por família
+if "date_id" in train.columns:
+    miss_by_date = train.groupby("date_id").apply(lambda df: df.isna().mean().mean())
+    miss_by_date.plot(figsize=(10, 2.8), title="% de NaN médio por date_id")
+    plt.tight_layout()
+    plt.show()
+
+families = ["M", "E", "I", "P", "V", "S", "D", "MOM"]
+fam_rows = []
+for fam in families:
+    cols = [c for c in train.columns if c.startswith(fam)]
+    if not cols:
+        continue
+    miss_pct = float(train[cols].isna().mean().mean() * 100)
+    corr_mat = train[cols].corr().abs()
+    if not corr_mat.empty:
+        mask = ~np.eye(len(corr_mat), dtype=bool)
+        median_corr = float(corr_mat.where(mask).stack().median())
+    else:
+        median_corr = np.nan
+    fam_rows.append({"family": fam, "n_cols": len(cols), "missing_pct": miss_pct, "median_abs_corr": median_corr})
+
+if fam_rows:
+    fam_df = pd.DataFrame(fam_rows).sort_values("missing_pct", ascending=False)
+    display(fam_df)
+
+# %% [markdown]
+# ## 8. Validação temporal (Sharpe ajustado oficial)
+# %% [markdown]
 # ## 8. Validação temporal (Sharpe ajustado oficial)
 # Métrica principal = Sharpe ajustado local. RMSE só é usado como diagnóstico secundário em cortes simples.
 
