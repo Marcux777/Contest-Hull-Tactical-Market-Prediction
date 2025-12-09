@@ -722,10 +722,10 @@ def prepare_features(df, target):
     return df_sorted, feature_cols
 
 
-def preprocess_basic(df, feature_cols, ref_cols=None):
+def preprocess_basic(df, feature_cols, ref_cols=None, ref_medians=None):
     feature_cols = list(dict.fromkeys(feature_cols))
     feature_frame = df.reindex(columns=feature_cols)
-    medians = feature_frame.median()
+    medians = ref_medians if ref_medians is not None else feature_frame.median()
     filled = feature_frame.fillna(medians).fillna(0)
 
     missing_mask = feature_frame.isna()
@@ -752,7 +752,7 @@ def preprocess_basic(df, feature_cols, ref_cols=None):
         df_proc = df_proc.loc[:, ~df_proc.columns.duplicated()]
     keep = [col for col in df_proc.columns if df_proc[col].std(ddof=0) > 1e-9]
     out = df_proc[keep] if ref_cols is None else df_proc.reindex(columns=ref_cols, fill_value=0)
-    return out, list(out.columns)
+    return out, list(out.columns), medians
 
 
 def time_split(df, cutoff=0.8):
@@ -1570,8 +1570,8 @@ def expanding_holdout_eval(
         return None
 
     train_aligned, holdout_aligned, cols_use = align_feature_frames(train_part, holdout_part, feature_cols)
-    tr_proc, keep_cols = preprocess_basic(train_aligned, cols_use)
-    ho_proc, _ = preprocess_basic(holdout_aligned, cols_use, ref_cols=keep_cols)
+    tr_proc, keep_cols, medians = preprocess_basic(train_aligned, cols_use)
+    ho_proc, _, _ = preprocess_basic(holdout_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
     X_tr = tr_proc.drop(columns=[target], errors="ignore")
     y_tr = train_part[target]
     X_ho = ho_proc.drop(columns=[target], errors="ignore")
@@ -1711,8 +1711,8 @@ print(f"Baseline 80/20 usando feature set: {best_set} ({len(feature_cols_best)} 
 
 train_df, val_df = time_split(_df, cutoff=0.8)
 train_aligned, val_aligned, cols_use = align_feature_frames(train_df, val_df, feature_cols_best)
-train_df_proc, keep_cols = preprocess_basic(train_aligned, cols_use)
-val_df_proc, _ = preprocess_basic(val_aligned, cols_use, ref_cols=keep_cols)
+train_df_proc, keep_cols, medians = preprocess_basic(train_aligned, cols_use)
+val_df_proc, _, _ = preprocess_basic(val_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
 
 X_train = train_df_proc.drop(columns=[target_col], errors="ignore")
 X_val = val_df_proc.drop(columns=[target_col], errors="ignore")
@@ -2076,8 +2076,8 @@ def train_full_and_predict_model(
 
     df_train_base, df_test_base, feature_cols_aligned = align_feature_frames(df_train_base, df_test_base, feature_cols_use)
 
-    df_train_proc, keep_cols = preprocess_basic(df_train_base, feature_cols_aligned)
-    df_test_proc, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols)
+    df_train_proc, keep_cols, medians = preprocess_basic(df_train_base, feature_cols_aligned)
+    df_test_proc, _, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols, ref_medians=medians)
     X_tr = df_train_proc.drop(columns=[target_col], errors="ignore")
     y_tr = df_train_raw.loc[df_train_proc.index, target_col]
     X_te = df_test_proc.drop(columns=[target_col], errors="ignore")
@@ -2746,8 +2746,8 @@ else:
 for cutoff in [0.7, 0.8]:
     tr_alt, va_alt = time_split(_df, cutoff=cutoff)
     tr_alt_aligned, va_alt_aligned, cols_use = align_feature_frames(tr_alt, va_alt, feature_cols)
-    tr_proc, keep_cols = preprocess_basic(tr_alt_aligned, cols_use)
-    va_proc, _ = preprocess_basic(va_alt_aligned, cols_use, ref_cols=keep_cols)
+    tr_proc, keep_cols, medians = preprocess_basic(tr_alt_aligned, cols_use)
+    va_proc, _, _ = preprocess_basic(va_alt_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
     X_tr = tr_proc.drop(columns=[target_col], errors="ignore")
     y_tr = tr_alt_aligned[target_col]
     X_va = va_proc.drop(columns=[target_col], errors="ignore")

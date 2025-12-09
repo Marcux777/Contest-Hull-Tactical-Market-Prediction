@@ -111,8 +111,8 @@ def evaluate_baselines(train_df, feature_cols, target_col, cfg: HullConfig | Non
     tr = train_df.iloc[:tr_frac].copy()
     va = train_df.iloc[tr_frac:].copy()
     tr_aligned, va_aligned, cols_use = align_feature_frames(tr, va, feature_cols)
-    tr_proc, keep_cols = preprocess_basic(tr_aligned, cols_use)
-    va_proc, _ = preprocess_basic(va_aligned, cols_use, ref_cols=keep_cols)
+    tr_proc, keep_cols, medians = preprocess_basic(tr_aligned, cols_use)
+    va_proc, _, _ = preprocess_basic(va_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
 
     X_tr = tr_proc.drop(columns=[target_col], errors="ignore")
     X_va = va_proc.drop(columns=[target_col], errors="ignore")
@@ -453,8 +453,8 @@ def time_cv_lightgbm(
                 continue
 
         df_tr_aligned, df_val_aligned, cols_use = align_feature_frames(df_tr, df_val, feature_cols)
-        df_tr_proc, keep_cols = preprocess_basic(df_tr_aligned, cols_use)
-        df_val_proc, _ = preprocess_basic(df_val_aligned, cols_use, ref_cols=keep_cols)
+        df_tr_proc, keep_cols, medians = preprocess_basic(df_tr_aligned, cols_use)
+        df_val_proc, _, _ = preprocess_basic(df_val_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
 
         X_tr = df_tr_proc.drop(columns=[target_col], errors="ignore")
         y_tr = df_tr[target_col]
@@ -649,8 +649,8 @@ def run_cv_preds(
             if df_tr.empty:
                 continue
         df_tr_aligned, df_val_aligned, cols_use = align_feature_frames(df_tr, df_val, feature_cols)
-        df_tr_proc, keep_cols = preprocess_basic(df_tr_aligned, cols_use)
-        df_val_proc, _ = preprocess_basic(df_val_aligned, cols_use, ref_cols=keep_cols)
+        df_tr_proc, keep_cols, medians = preprocess_basic(df_tr_aligned, cols_use)
+        df_val_proc, _, _ = preprocess_basic(df_val_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
         X_tr = df_tr_proc.drop(columns=[target_col], errors="ignore")
         y_tr = df_tr[target_col]
         X_val = df_val_proc.drop(columns=[target_col], errors="ignore")
@@ -820,8 +820,8 @@ def expanding_holdout_eval(
         return None
 
     train_aligned, holdout_aligned, cols_use = align_feature_frames(train_part, holdout_part, feature_cols)
-    tr_proc, keep_cols = preprocess_basic(train_aligned, cols_use)
-    ho_proc, _ = preprocess_basic(holdout_aligned, cols_use, ref_cols=keep_cols)
+    tr_proc, keep_cols, medians = preprocess_basic(train_aligned, cols_use)
+    ho_proc, _, _ = preprocess_basic(holdout_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
     X_tr = tr_proc.drop(columns=[target], errors="ignore")
     y_tr = train_part[target]
     X_ho = ho_proc.drop(columns=[target], errors="ignore")
@@ -1090,8 +1090,8 @@ def prepare_train_test_frames(
 
     df_train_base, df_test_base, feature_cols_aligned = align_feature_frames(df_train_base, df_test_base, feature_cols_use)
 
-    df_train_proc, keep_cols = preprocess_basic(df_train_base, feature_cols_aligned)
-    df_test_proc, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols)
+    df_train_proc, keep_cols, medians = preprocess_basic(df_train_base, feature_cols_aligned)
+    df_test_proc, _, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols, ref_medians=medians)
     X_tr = df_train_proc.drop(columns=[target_col], errors="ignore")
     y_tr = df_train_raw.loc[df_train_proc.index, target_col]
     X_te = df_test_proc.drop(columns=[target_col], errors="ignore")

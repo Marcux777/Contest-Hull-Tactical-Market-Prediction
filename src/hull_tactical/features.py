@@ -52,10 +52,15 @@ def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[
     return df_sorted, feature_cols
 
 
-def preprocess_basic(df: pd.DataFrame, feature_cols: list[str], ref_cols: list[str] | None = None) -> tuple[pd.DataFrame, list[str]]:
+def preprocess_basic(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    ref_cols: list[str] | None = None,
+    ref_medians: pd.Series | None = None,
+) -> tuple[pd.DataFrame, list[str], pd.Series]:
     feature_cols = list(dict.fromkeys(feature_cols))
     feature_frame = df.reindex(columns=feature_cols)
-    medians = feature_frame.median()
+    medians = ref_medians if ref_medians is not None else feature_frame.median()
     filled = feature_frame.fillna(medians).fillna(0)
 
     missing_mask = feature_frame.isna()
@@ -82,7 +87,7 @@ def preprocess_basic(df: pd.DataFrame, feature_cols: list[str], ref_cols: list[s
         df_proc = df_proc.loc[:, ~df_proc.columns.duplicated()]
     keep = [col for col in df_proc.columns if df_proc[col].std(ddof=0) > 1e-9]
     out = df_proc[keep] if ref_cols is None else df_proc.reindex(columns=ref_cols, fill_value=0)
-    return out, list(out.columns)
+    return out, list(out.columns), medians
 
 
 def time_split(df: pd.DataFrame, cutoff: float = 0.8) -> tuple[pd.DataFrame, pd.DataFrame]:
