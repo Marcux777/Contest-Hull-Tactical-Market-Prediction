@@ -192,6 +192,8 @@ def time_cv_lightgbm_fitref(
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    intent_cfg = cfg_resolved.intentional_cfg or INTENTIONAL_CFG
+    fe_cfg = cfg_resolved.feature_cfg or FEATURE_CFG_DEFAULT
     splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
     metrics = []
     if not splits:
@@ -210,13 +212,13 @@ def time_cv_lightgbm_fitref(
             continue
 
         df_tr_fe, fs_tr = build_feature_sets(
-            df_tr, target_col, intentional_cfg=INTENTIONAL_CFG, fe_cfg=FEATURE_CFG_DEFAULT, fit_ref=df_tr
+            df_tr, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=df_tr
         )
         if df_tr_fe.columns.has_duplicates:
             df_tr_fe = df_tr_fe.loc[:, ~df_tr_fe.columns.duplicated(keep="last")]
         cols = fs_tr.get(feature_set_name, next(iter(fs_tr.values())))
         df_val_fe, _ = build_feature_sets(
-            df_val, target_col, intentional_cfg=INTENTIONAL_CFG, fe_cfg=FEATURE_CFG_DEFAULT, fit_ref=df_tr
+            df_val, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=df_tr
         )
         if df_val_fe.columns.has_duplicates:
             df_val_fe = df_val_fe.loc[:, ~df_val_fe.columns.duplicated(keep="last")]

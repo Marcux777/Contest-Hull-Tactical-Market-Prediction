@@ -54,4 +54,4 @@
   - [x] Detalhar agents em `src/hull_tactical/agents/` com stubs (data/feature/training/eval/submission).
 - [ ] Clarificar feature sets vs pipeline
   - [x] Documentar em `features.py` os nomes/descrições dos feature sets expostos.
-  - [ ] Garantir notebook e scripts referenciam apenas `make_features`/feature_sets documentados.
+  - [x] Garantir notebook e scripts referenciam apenas `make_features`/feature_sets documentados.

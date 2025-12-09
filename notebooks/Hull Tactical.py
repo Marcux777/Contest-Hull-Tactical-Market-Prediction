@@ -1249,8 +1249,9 @@ intentional_summary_rows = []
 for cfg in intentional_tuning_grid:
     cfg_name = cfg.get("name", f"cfg_{len(intentional_summary_rows)}")
     print(f"\nConfig intencional: {cfg_name} -> {cfg}")
-    df_cfg, feature_sets_cfg = build_feature_sets(train, target_col, intentional_cfg=cfg, fe_cfg=FEATURE_CFG_DEFAULT)
-    metrics_cfg = time_cv_lightgbm(df_cfg, feature_sets_cfg["D_intentional"], target_col, n_splits=4)
+    cfg_use = hm.default_config()
+    cfg_use.intentional_cfg = {**INTENTIONAL_CFG, **cfg}
+    metrics_cfg = pipeline.run_time_cv(train, feature_set="D_intentional", target_col=target_col, cfg=cfg_use, n_splits=4, val_frac=0.12)
     intentional_cv_results[cfg_name] = metrics_cfg
     summary_cfg = summarize_cv_metrics(metrics_cfg) or {}
     summary_cfg.update(
@@ -1270,6 +1271,8 @@ if not intentional_summary_df.empty and intentional_summary_df["sharpe_mean"].no
     best_idx = intentional_summary_df["sharpe_mean"].astype(float).idxmax()
     best_cfg = intentional_tuning_grid[int(best_idx)]
     INTENTIONAL_CFG = {**INTENTIONAL_CFG, **best_cfg}
+    PIPELINE_CFG.intentional_cfg = INTENTIONAL_CFG
+    PIPELINE_CFG.feature_cfg = PIPELINE_CFG.feature_cfg or FEATURE_CFG_DEFAULT
     print(f"\nMelhor config para features intencionais: {best_cfg.get('name')} | Sharpe={intentional_summary_df.loc[best_idx, 'sharpe_mean']:.4f}")
     print(f"INTENTIONAL_CFG atualizada: {INTENTIONAL_CFG}")
     display(intentional_summary_df[["config", "sharpe_mean", "sharpe_std", "k_median", "alpha_median", "clip_bounds", "tanh_scale", "zscore_window", "zscore_clip"]])
@@ -1359,7 +1362,9 @@ for name, metrics in cv_metrics.items():
 
 # %%
 print("\n=== CV (fit_ref por fold) usando D_intentional ===")
-metrics_fitref = time_cv_lightgbm_fitref(_df, "D_intentional", target_col, n_splits=4, val_frac=0.12, num_boost_round=180)
+metrics_fitref = pipeline.run_time_cv_fitref(
+    train, feature_set="D_intentional", target_col=target_col, cfg=PIPELINE_CFG, n_splits=4, val_frac=0.12, num_boost_round=180
+)
 if metrics_fitref:
     df_fitref = pd.DataFrame(metrics_fitref)
     display(df_fitref)
@@ -1374,9 +1379,17 @@ else:
 
 # %%
 print("\n=== CV LGBM ponderado por is_scored (peso_non_scored=0.2) ===")
-feature_cols_weighted = feature_sets.get("D_intentional") or feature_cols_cv
-metrics_weighted = time_cv_lightgbm_weighted(
-    _df, feature_cols_weighted, target_col, n_splits=4, val_frac=0.12, num_boost_round=180, weight_scored=1.0, weight_unscored=0.2
+metrics_weighted = pipeline.run_time_cv(
+    train,
+    feature_set=PIPELINE_FEATURE_SET,
+    target_col=target_col,
+    cfg=PIPELINE_CFG,
+    n_splits=4,
+    val_frac=0.12,
+    num_boost_round=180,
+    weight_scored=1.0,
+    weight_unscored=0.2,
+    log_prefix="[weighted]",
 )
 if metrics_weighted:
     print(f"Sharpe médio (weighted): {np.mean([m['sharpe'] for m in metrics_weighted]):.4f}")
@@ -1391,7 +1404,18 @@ params_conservative = {
     "lambda_l2": 0.5,
 }
 print("\n=== CV LGBM conservador (mais regularização) ===")
-metrics_cons = time_cv_lightgbm(_df, feature_cols_cv, target_col, n_splits=4, val_frac=0.12, params_override=params_conservative, num_boost_round=180, early_stopping_rounds=15)
+metrics_cons = pipeline.run_time_cv(
+    train,
+    feature_set=PIPELINE_FEATURE_SET,
+    target_col=target_col,
+    cfg=PIPELINE_CFG,
+    n_splits=4,
+    val_frac=0.12,
+    params_override=params_conservative,
+    num_boost_round=180,
+    early_stopping_rounds=15,
+    log_prefix="[cons]",
+)
 if metrics_cons:
     print(f"Sharpe médio (conservador): {np.mean([m['sharpe'] for m in metrics_cons]):.4f}")
 
@@ -1515,10 +1539,11 @@ is_scored_configs = [
 is_scored_results = []
 for cfg in is_scored_configs:
     print(f"\n=== CV is_scored cfg={cfg['name']} ===")
-    metrics_cfg = time_cv_lightgbm(
-        _df,
-        feature_cols_cv,
-        target_col,
+    metrics_cfg = pipeline.run_time_cv(
+        train,
+        feature_set=PIPELINE_FEATURE_SET,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
         n_splits=4,
         val_frac=0.12,
         weight_scored=1.0,
@@ -1527,26 +1552,19 @@ for cfg in is_scored_configs:
         log_prefix=f"[{cfg['name']}]",
     )
     summary = summarize_cv_metrics(metrics_cfg) or {}
-    hold12 = expanding_holdout_eval(
-        _df,
-        feature_cols_cv,
-        target_col,
-        holdout_frac=0.12,
+    holdouts = pipeline.run_holdout_eval(
+        train,
+        feature_set=PIPELINE_FEATURE_SET,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
+        holdout_fracs=(0.12, 0.15),
         train_only_scored=cfg["train_only_scored"],
-        label=f"ho12_{cfg['name']}",
         use_weights=cfg["weight_unscored"] is not None and cfg["weight_unscored"] != 1.0,
-        weight_unscored=cfg["weight_unscored"] or 1.0,
+        weight_unscored=cfg["weight_unscored"],
+        label_prefix=f"ho_{cfg['name']}",
     )
-    hold15 = expanding_holdout_eval(
-        _df,
-        feature_cols_cv,
-        target_col,
-        holdout_frac=0.15,
-        train_only_scored=cfg["train_only_scored"],
-        label=f"ho15_{cfg['name']}",
-        use_weights=cfg["weight_unscored"] is not None and cfg["weight_unscored"] != 1.0,
-        weight_unscored=cfg["weight_unscored"] or 1.0,
-    )
+    hold12 = next((h for h in holdouts if h and abs(h.get("holdout_frac", 0) - 0.12) < 1e-9), None)
+    hold15 = next((h for h in holdouts if h and abs(h.get("holdout_frac", 0) - 0.15) < 1e-9), None)
     is_scored_results.append(
         {
             "config": cfg["name"],
@@ -2446,21 +2464,39 @@ if blend_stats:
         )
 
 holdout_results = []
-holdout_results.append(expanding_holdout_eval(_df, feature_cols_cv, target_col, holdout_frac=0.12, train_only_scored=False, label="holdout_12"))
-holdout_results.append(expanding_holdout_eval(_df, feature_cols_cv, target_col, holdout_frac=0.15, train_only_scored=False, label="holdout_15"))
-holdout_results.append(
-    expanding_holdout_eval(
-        _df,
-        feature_cols_cv,
-        target_col,
-        holdout_frac=0.12,
-        train_only_scored=False,
-        label="holdout_12_weighted",
-        use_weights=True,
-        weight_unscored=weight_unscored_cv,
+holdout_results.extend(
+    pipeline.run_holdout_eval(
+        train,
+        feature_set=best_set,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
+        holdout_fracs=(0.12, 0.15),
+        label_prefix="holdout_full",
     )
 )
-holdout_results.append(expanding_holdout_eval(_df, feature_cols, target_col, holdout_frac=0.12, train_only_scored=True, label="holdout_12_scored"))
+holdout_results.extend(
+    pipeline.run_holdout_eval(
+        train,
+        feature_set=best_set,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
+        holdout_fracs=(0.12,),
+        use_weights=True,
+        weight_unscored=weight_unscored_cv,
+        label_prefix="holdout_weighted",
+    )
+)
+holdout_results.extend(
+    pipeline.run_holdout_eval(
+        train,
+        feature_set=best_set,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
+        holdout_fracs=(0.12,),
+        train_only_scored=True,
+        label_prefix="holdout_scored",
+    )
+)
 holdout_results = [r for r in holdout_results if r]
 
 if holdout_results:
@@ -2484,9 +2520,18 @@ else:
     print("Holdout não calculado (cheque date_id e tamanho do dataset).")
 
 # Comparação CV com treino apenas em is_scored
-if IS_SCORED_COL and IS_SCORED_COL in _df.columns:
-    df_scored_only = _df.loc[_df[IS_SCORED_COL] == 1].copy()
-    metrics_scored = metrics_lgb_scored or time_cv_lightgbm(df_scored_only, feature_cols, target_col, n_splits=4, val_frac=0.12)
+if IS_SCORED_COL and IS_SCORED_COL in train.columns:
+    df_scored_only = train.loc[train[IS_SCORED_COL] == 1].copy()
+    metrics_scored = metrics_lgb_scored or pipeline.run_time_cv(
+        df_scored_only,
+        feature_set=best_set,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
+        n_splits=4,
+        val_frac=0.12,
+        train_only_scored=True,
+        log_prefix="[is_scored_only]",
+    )
     if metrics_scored:
         sharpe_vals = [m["sharpe"] for m in metrics_scored]
         print(f"CV (apenas is_scored): Sharpe médio={np.mean(sharpe_vals):.4f} | std={np.std(sharpe_vals):.4f}")
@@ -2520,7 +2565,17 @@ print(f"Experiments log salvo em {exp_log_path.resolve()}")
 cv_alt_configs = [(5, 0.10), (4, 0.15)]
 for n_splits, val_frac in cv_alt_configs:
     print(f"\n=== CV n_splits={n_splits}, val_frac={val_frac:.2f} ===")
-    metrics_alt = time_cv_lightgbm(_df, feature_cols, target_col, n_splits=n_splits, val_frac=val_frac, num_boost_round=150, early_stopping_rounds=15)
+    metrics_alt = pipeline.run_time_cv(
+        train,
+        feature_set=best_set,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
+        n_splits=n_splits,
+        val_frac=val_frac,
+        num_boost_round=150,
+        early_stopping_rounds=15,
+        log_prefix=f"[alt_{n_splits}_{val_frac}]",
+    )
     if metrics_alt:
         sharpe_mean = np.mean([m["sharpe"] for m in metrics_alt])
         k_median = np.median([m["best_k"] for m in metrics_alt if m.get("best_k") is not None])
@@ -2551,10 +2606,11 @@ def objective(trial):
         "lambda_l1": trial.suggest_float("lambda_l1", 0.0, 1.0),
         "lambda_l2": trial.suggest_float("lambda_l2", 0.0, 1.0),
     }
-    metrics = time_cv_lightgbm(
-        _df,
-        feature_cols,
-        target_col,
+    metrics = pipeline.run_time_cv(
+        train,
+        feature_set=best_set,
+        target_col=target_col,
+        cfg=PIPELINE_CFG,
         n_splits=5,
         params_override=params,
         num_boost_round=140,

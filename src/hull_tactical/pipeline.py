@@ -116,7 +116,14 @@ def choose_best_training_variant(
     return {"best": best, "all": results}
 
 
-__all__ = ["train_pipeline", "make_submission_csv", "choose_best_training_variant"]
+__all__ = [
+    "train_pipeline",
+    "make_submission_csv",
+    "choose_best_training_variant",
+    "run_time_cv",
+    "run_time_cv_fitref",
+    "run_holdout_eval",
+]
 
 
 def run_time_cv(
@@ -126,6 +133,13 @@ def run_time_cv(
     cfg: m.HullConfig | None = None,
     n_splits: int = 5,
     val_frac: float = 0.1,
+    params_override=None,
+    num_boost_round: int | None = None,
+    early_stopping_rounds: int | None = None,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    train_only_scored: bool = False,
+    log_prefix: str | None = None,
 ):
     """
     Wrapper para rodar CV temporal com o feature set escolhido usando o pipeline de features oficial.
@@ -141,4 +155,86 @@ def run_time_cv(
         fe_cfg=cfg_use.feature_cfg,
     )
     cols = feature_sets.get(feature_used, feature_cols)
-    return m.time_cv_lightgbm(train_fe, cols, target_col, n_splits=n_splits, val_frac=val_frac, cfg=cfg_use)
+    return m.time_cv_lightgbm(
+        train_fe,
+        cols,
+        target_col,
+        n_splits=n_splits,
+        val_frac=val_frac,
+        params_override=params_override,
+        num_boost_round=num_boost_round or (cfg_use.best_params.get("num_boost_round", 200) if cfg_use.best_params else 200),
+        early_stopping_rounds=early_stopping_rounds or 20,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
+        train_only_scored=train_only_scored,
+        log_prefix=log_prefix or "",
+        cfg=cfg_use,
+    )
+
+
+def run_time_cv_fitref(
+    df_train,
+    feature_set: str,
+    target_col: str = "target",
+    cfg: m.HullConfig | None = None,
+    n_splits: int = 4,
+    val_frac: float = 0.12,
+    params_override=None,
+    num_boost_round: int = 200,
+):
+    """
+    Wrapper para CV temporal recalculando features por fold (fit_ref), mantendo as configs do pacote.
+    """
+    cfg_use = cfg or default_config()
+    return m.time_cv_lightgbm_fitref(
+        df_train,
+        feature_set,
+        target_col,
+        n_splits=n_splits,
+        val_frac=val_frac,
+        params_override=params_override,
+        num_boost_round=num_boost_round,
+        cfg=cfg_use,
+    )
+
+
+def run_holdout_eval(
+    df_train,
+    feature_set: str,
+    target_col: str = "target",
+    cfg: m.HullConfig | None = None,
+    holdout_fracs: tuple[float, ...] = (0.12,),
+    train_only_scored: bool = False,
+    use_weights: bool = False,
+    weight_unscored: float | None = 0.2,
+    label_prefix: str = "holdout",
+):
+    """
+    Roda avaliações de holdout com o pipeline de features oficial e retorna lista de resultados (um por frac).
+    """
+    cfg_use = cfg or default_config()
+    train_fe, _, feature_cols, feature_sets, feature_used = features.make_features(
+        df_train,
+        test_df=None,
+        target_col=target_col,
+        feature_set=feature_set,
+        intentional_cfg=cfg_use.intentional_cfg,
+        fe_cfg=cfg_use.feature_cfg,
+    )
+    cols = feature_sets.get(feature_used, feature_cols)
+    results = []
+    for frac in holdout_fracs:
+        res = m.expanding_holdout_eval(
+            train_fe,
+            cols,
+            target_col,
+            holdout_frac=frac,
+            train_only_scored=train_only_scored,
+            label=f"{label_prefix}_{int(frac*100)}",
+            use_weights=use_weights,
+            weight_unscored=weight_unscored if use_weights else None,
+            cfg=cfg_use,
+        )
+        if res:
+            results.append(res)
+    return results
