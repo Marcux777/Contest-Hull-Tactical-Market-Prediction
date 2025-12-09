@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import data, features
+from . import models as m
 from .models import FEATURE_CFG_DEFAULT, INTENTIONAL_CFG, default_config, train_full_and_predict_model
 
 
@@ -56,4 +57,56 @@ def make_submission_csv(path: Path, allocations, row_ids):
     return path
 
 
-__all__ = ["train_pipeline", "make_submission_csv"]
+def choose_best_training_variant(
+    df,
+    feature_cols,
+    target_col: str,
+    variants: list[dict] | None = None,
+    cfg: m.HullConfig | None = None,
+):
+    """
+    Roda CV para variantes full / weighted / scored_only e retorna a melhor pelo Sharpe médio.
+    Cada variante é um dict com chaves: name, train_only_scored, weight_unscored.
+    """
+    cfg_use = m._resolve_cfg(cfg)
+    if variants is None:
+        variants = [
+            {"name": "full", "train_only_scored": False, "weight_unscored": 1.0},
+            {"name": "weighted_0.2", "train_only_scored": False, "weight_unscored": 0.2},
+            {"name": "scored_only", "train_only_scored": True, "weight_unscored": None},
+        ]
+    results = []
+    for variant in variants:
+        metrics = m.time_cv_lightgbm(
+            df,
+            feature_cols,
+            target_col,
+            n_splits=4,
+            val_frac=0.12,
+            weight_scored=1.0,
+            weight_unscored=variant.get("weight_unscored"),
+            train_only_scored=variant.get("train_only_scored", False),
+            cfg=cfg_use,
+            log_prefix=f"[{variant.get('name','variant')}]",
+        )
+        summary = m.summarize_cv_metrics(metrics) or {}
+        results.append(
+            {
+                "name": variant.get("name"),
+                "train_only_scored": variant.get("train_only_scored", False),
+                "weight_unscored": variant.get("weight_unscored"),
+                "metrics": metrics,
+                "summary": summary,
+            }
+        )
+    best = None
+    for res in results:
+        sharpe_mean = res["summary"].get("sharpe_mean")
+        if sharpe_mean is None or not (sharpe_mean == sharpe_mean):
+            continue
+        if best is None or sharpe_mean > best["summary"].get("sharpe_mean", float("-inf")):
+            best = res
+    return {"best": best, "all": results}
+
+
+__all__ = ["train_pipeline", "make_submission_csv", "choose_best_training_variant"]

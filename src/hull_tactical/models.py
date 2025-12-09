@@ -426,6 +426,11 @@ def time_cv_lightgbm(
     log_prefix="",
     cfg: HullConfig | None = None,
 ):
+    """
+    Cross-val temporal com LightGBM.
+    - weight_scored/weight_unscored: permitem ponderar linhas is_scored; se ambos None, treino sem pesos.
+    - train_only_scored=True filtra o treino para usar apenas linhas is_scored==1 (útil para comparar variantes).
+    """
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
@@ -575,7 +580,10 @@ def time_cv_lightgbm_weighted(
     weight_unscored=0.2,
     cfg: HullConfig | None = None,
 ):
-    """CV temporal com pesos para is_scored (treino ponderado; avaliação segue métrica oficial)."""
+    """
+    Conveniência para CV temporal ponderada por is_scored.
+    Treino recebe pesos weight_scored/weight_unscored; avaliação continua pela métrica oficial (usa is_scored no slice).
+    """
     metrics = time_cv_lightgbm(
         df,
         feature_cols,
