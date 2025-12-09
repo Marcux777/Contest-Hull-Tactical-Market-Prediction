@@ -61,6 +61,14 @@ BEST_PARAMS = {
 }
 
 
+def set_data_columns(market_col: str | None = None, rf_col: str | None = None, is_scored_col: str | None = None) -> None:
+    """Setter explícito para colunas-chave; evita depender de globais implícitas."""
+    global MARKET_COL, RF_COL, IS_SCORED_COL
+    MARKET_COL = market_col or MARKET_COL
+    RF_COL = rf_col or RF_COL
+    IS_SCORED_COL = is_scored_col or IS_SCORED_COL
+
+
 def evaluate_baselines(train_df, feature_cols, target_col):
     """Baselines simples em split 80/20: alocação constante e modelo linear (Ridge)."""
     tr_frac = int(len(train_df) * 0.8)
@@ -860,6 +868,96 @@ def train_full_and_predict_model(
     """Aplica pipeline de features compartilhado com a CV, treina modelo especificado e retorna alocação."""
     seed_use = SEED if seed is None else seed
     np.random.seed(seed_use)
+    prep = prepare_train_test_frames(
+        df_train,
+        df_test,
+        feature_cols,
+        target_col,
+        intentional_cfg=intentional_cfg,
+        fe_cfg=fe_cfg,
+        feature_set=feature_set,
+        train_only_scored=train_only_scored,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
+        df_train_fe=df_train_fe,
+        df_test_fe=df_test_fe,
+    )
+
+    if model_kind == "lgb":
+        params_use = dict(BEST_PARAMS)
+        if params:
+            params_use.update(params)
+        params_use["seed"] = seed_use
+        train_ds = lgb.Dataset(prep["X_tr"], label=prep["y_tr"], weight=prep["train_weight"])
+        model = lgb.train(
+            params_use,
+            train_ds,
+            num_boost_round=int(params_use.get("num_boost_round", 400)),
+        )
+        pred_test = model.predict(prep["X_te"], num_iteration=model.best_iteration or model.current_iteration())
+    elif model_kind == "ridge":
+        alpha = params.get("alpha", 1.0) if params else 1.0
+        model = Ridge(alpha=alpha, random_state=seed_use)
+        model.fit(prep["X_tr"], prep["y_tr"], sample_weight=prep["train_weight"])
+        pred_test = model.predict(prep["X_te"])
+    elif model_kind == "cat" and HAS_CAT:
+        default = {
+            "depth": 6,
+            "learning_rate": 0.05,
+            "iterations": 500,
+            "loss_function": "RMSE",
+            "random_seed": seed_use,
+            "verbose": False,
+        }
+        if params:
+            default.update(params)
+        model = CatBoostRegressor(**default)
+        fit_kwargs = {"verbose": False}
+        if prep["train_weight"] is not None:
+            fit_kwargs["sample_weight"] = prep["train_weight"]
+        model.fit(prep["X_tr"], prep["y_tr"], **fit_kwargs)
+        pred_test = model.predict(prep["X_te"])
+    elif model_kind == "xgb" and HAS_XGB:
+        default = {
+            "n_estimators": 400,
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "random_state": seed_use,
+            "objective": "reg:squarederror",
+        }
+        if params:
+            default.update(params)
+        model = xgb.XGBRegressor(**default)
+        fit_kwargs = {"verbose": False}
+        if prep["train_weight"] is not None:
+            fit_kwargs["sample_weight"] = prep["train_weight"]
+        model.fit(prep["X_tr"], prep["y_tr"], **fit_kwargs)
+        pred_test = model.predict(prep["X_te"])
+    else:
+        raise ValueError(f"Modelo {model_kind} não suportado ou dependência ausente.")
+
+    k_use = alloc_k if alloc_k is not None else ALLOC_K
+    alloc_test = map_return_to_alloc(pred_test, k=k_use, intercept=alloc_alpha)
+    return pd.Series(alloc_test, index=prep["df_test_index"])
+
+
+def prepare_train_test_frames(
+    df_train,
+    df_test,
+    feature_cols,
+    target_col,
+    intentional_cfg=None,
+    fe_cfg=None,
+    feature_set=None,
+    train_only_scored=False,
+    weight_scored=None,
+    weight_unscored=None,
+    df_train_fe=None,
+    df_test_fe=None,
+):
+    """Prepara matrizes X/y de treino e teste com pipeline de features compartilhado."""
     fe_cfg_use = FEATURE_CFG_DEFAULT if fe_cfg is None else fe_cfg
     feature_cols_use = list(feature_cols) if feature_cols is not None else None
     use_weights = weight_scored is not None or weight_unscored is not None
@@ -911,65 +1009,14 @@ def train_full_and_predict_model(
         if use_weights
         else None
     )
-
-    if model_kind == "lgb":
-        params_use = dict(BEST_PARAMS)
-        if params:
-            params_use.update(params)
-        params_use["seed"] = seed_use
-        train_ds = lgb.Dataset(X_tr, label=y_tr, weight=train_weight)
-        model = lgb.train(
-            params_use,
-            train_ds,
-            num_boost_round=int(params_use.get("num_boost_round", 400)),
-        )
-        pred_test = model.predict(X_te, num_iteration=model.best_iteration or model.current_iteration())
-    elif model_kind == "ridge":
-        alpha = params.get("alpha", 1.0) if params else 1.0
-        model = Ridge(alpha=alpha, random_state=seed_use)
-        model.fit(X_tr, y_tr, sample_weight=train_weight)
-        pred_test = model.predict(X_te)
-    elif model_kind == "cat" and HAS_CAT:
-        default = {
-            "depth": 6,
-            "learning_rate": 0.05,
-            "iterations": 500,
-            "loss_function": "RMSE",
-            "random_seed": seed_use,
-            "verbose": False,
-        }
-        if params:
-            default.update(params)
-        model = CatBoostRegressor(**default)
-        fit_kwargs = {"verbose": False}
-        if train_weight is not None:
-            fit_kwargs["sample_weight"] = train_weight
-        model.fit(X_tr, y_tr, **fit_kwargs)
-        pred_test = model.predict(X_te)
-    elif model_kind == "xgb" and HAS_XGB:
-        default = {
-            "n_estimators": 400,
-            "learning_rate": 0.05,
-            "max_depth": 6,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "random_state": seed_use,
-            "objective": "reg:squarederror",
-        }
-        if params:
-            default.update(params)
-        model = xgb.XGBRegressor(**default)
-        fit_kwargs = {"verbose": False}
-        if train_weight is not None:
-            fit_kwargs["sample_weight"] = train_weight
-        model.fit(X_tr, y_tr, **fit_kwargs)
-        pred_test = model.predict(X_te)
-    else:
-        raise ValueError(f"Modelo {model_kind} não suportado ou dependência ausente.")
-
-    k_use = alloc_k if alloc_k is not None else ALLOC_K
-    alloc_test = map_return_to_alloc(pred_test, k=k_use, intercept=alloc_alpha)
-    return pd.Series(alloc_test, index=df_test_proc.index)
+    return {
+        "X_tr": X_tr,
+        "y_tr": y_tr,
+        "X_te": X_te,
+        "df_test_index": df_test_proc.index,
+        "feature_cols": feature_cols_aligned,
+        "train_weight": train_weight,
+    }
 
 
 def add_exp_log(
@@ -1034,5 +1081,7 @@ __all__ = [
     "compute_sharpe_weights",
     "blend_and_eval",
     "train_full_and_predict_model",
+    "prepare_train_test_frames",
     "add_exp_log",
+    "set_data_columns",
 ]

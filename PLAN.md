@@ -41,3 +41,8 @@
   - [x] Extrair funções/helpers faltantes para `src/` (ex.: treino LightGBM, CV time-aware, pós-processamento), mantendo assinatura compatível com Kaggle.
   - [x] Atualizar o notebook para consumir os helpers modularizados e reduzir código duplicado.
   - [x] Validar importação (`py_compile`/execução a seco) e sincronizar com `jupytext --sync`.
+- [ ] Refinos pós-modularização
+  - [ ] Quebrar funções grandes de treino/predição em helpers menores e reutilizáveis em `src/hull_modeling.py`.
+  - [ ] Reduzir dependência de globais criando setter explícito para colunas (market/rf/is_scored) e passando-as aos helpers-chave.
+  - [ ] Evitar duplicação na materialização de módulos no notebook com helper único de cópia.
+  - [ ] Adicionar testes leves em `tests/` para métricas e preparação de dados (ex.: `adjusted_sharpe_score`, splits, preparação de matrizes).
