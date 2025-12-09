@@ -1,6 +1,14 @@
 """
 Feature engineering and preprocessing helpers for the Hull Tactical notebook.
 Kept dependency-free (pandas/numpy only) so they can run inside Kaggle without extra installs.
+
+Feature sets expostos (chaves usuais do dict retornado por build_feature_sets/make_features):
+- A_baseline: colunas numéricas originais (exceto ids/target/forward_returns/rf) sem agregações.
+- B_families: baseline + agregações por família (mean/std/median).
+- C_regimes: B + regimes (std/mean e flags de vol).
+- D_intentional: C + features intencionais (lags, clip, tanh, z).
+- E_fe_oriented: D + restante das features engenheiradas (quando use_extended_set=True).
+- F_v2_intentional: E + quaisquer colunas adicionais não cobertas em E (fallback).
 """
 from __future__ import annotations
 
@@ -25,6 +33,8 @@ FEATURE_CFG_DEFAULT = {
     "add_diffs": True,  # mean-std per family
     "use_extended_set": True,  # expose set E_fe_oriented
 }
+
+FEATURE_SET_NAMES = ["A_baseline", "B_families", "C_regimes", "D_intentional", "E_fe_oriented", "F_v2_intentional"]
 
 
 def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[str]]:
@@ -402,11 +412,18 @@ def make_features(
     fe_cfg: dict | None = None,
 ):
     """
-    Unified feature pipeline for all flows (CV, diagnostics, final training):
-    - lags, family aggregations, regimes, intentional features;
-    - winsor/clipping, ratios/diffs, cross-section norms, surprise, finance combos;
-    - applies the same FE fit on test via fit_ref.
-    Returns engineered train/test frames, list of feature columns for the chosen set, and the feature_sets dict.
+    Unified feature pipeline for all flows (CV, diagnostics, final training).
+    Inputs:
+    - train_df/test_df: precisam conter colunas numéricas e, quando disponível, date_id/forward_returns/risk_free_rate/market_forward_excess_returns.
+    - target_col: nome da coluna alvo no train_df (ex.: "target").
+    - feature_set: chave do feature set (A_baseline, B_families, C_regimes, D_intentional, E_fe_oriented, F_v2_intentional).
+    - intentional_cfg / fe_cfg: dicionários para ajustar clipping/tanh/zscore e FE (winsor, ratios/diffs, etc.).
+
+    Saídas:
+    - train_fe/test_fe: dataframes com features engenheiradas (antes do preprocess_basic);
+    - feature_cols: lista de colunas do feature_set escolhido;
+    - feature_sets: dict {feature_set_name -> lista de colunas};
+    - feature_set: nome efetivo usado (cai no default se None).
     """
     if target_col is None:
         raise ValueError("target_col is required in make_features")

@@ -52,3 +52,6 @@
   - [x] Adicionar módulos básicos `data.py` (load/split) e `pipeline.py` (pipeline mínimo de treino/submissão).
   - [x] Ajustar notebook/testes para importar `hull_tactical.*` e materializar pacote para uso offline.
   - [x] Detalhar agents em `src/hull_tactical/agents/` com stubs (data/feature/training/eval/submission).
+- [ ] Clarificar feature sets vs pipeline
+  - [x] Documentar em `features.py` os nomes/descrições dos feature sets expostos.
+  - [ ] Garantir notebook e scripts referenciam apenas `make_features`/feature_sets documentados.
