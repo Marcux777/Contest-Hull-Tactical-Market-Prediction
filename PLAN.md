@@ -36,3 +36,8 @@
 - [ ] Corrigir CV fit_ref (ValueError em prepare_features)
   - [x] Identificar e remover/deduplicar colunas que ainda chegam duplicadas no fluxo do `time_cv_lightgbm_fitref`/`build_feature_sets`, evitando que `df_sorted[c]` retorne DataFrame e gere “truth value of a Series is ambiguous”.
   - [x] Validar `time_cv_lightgbm_fitref` rodando sem erros com o feature set `D_intentional` após o ajuste (ajuste aplicado; rodar a célula para confirmar em runtime).
+- [x] Modularização notebook → src
+  - [x] Mapear blocos de código reutilizáveis no `notebooks/Hull Tactical.py` (features, validação, treino, inferência).
+  - [x] Extrair funções/helpers faltantes para `src/` (ex.: treino LightGBM, CV time-aware, pós-processamento), mantendo assinatura compatível com Kaggle.
+  - [x] Atualizar o notebook para consumir os helpers modularizados e reduzir código duplicado.
+  - [x] Validar importação (`py_compile`/execução a seco) e sincronizar com `jupytext --sync`.
