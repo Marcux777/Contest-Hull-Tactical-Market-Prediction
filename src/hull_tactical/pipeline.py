@@ -14,10 +14,17 @@ def train_pipeline(
     feature_set: str | None = None,
     feature_cfg: dict | None = None,
     intentional_cfg: dict | None = None,
+    df_train=None,
+    df_test=None,
+    cfg: m.HullConfig | None = None,
 ):
-    """Minimal train pipeline using existing feature/model helpers."""
-    cfg = default_config()
-    df_train, df_test = data.load_raw_data(data_dir)
+    """
+    Minimal train pipeline using existing feature/model helpers.
+    Se df_train/df_test forem fornecidos, são usados diretamente; caso contrário, carrega de data_dir.
+    """
+    cfg = cfg or default_config()
+    if df_train is None or df_test is None:
+        df_train, df_test = data.load_raw_data(data_dir)
     fe_cfg = feature_cfg or cfg.feature_cfg or FEATURE_CFG_DEFAULT
     intent_cfg = intentional_cfg or cfg.intentional_cfg or INTENTIONAL_CFG
     cfg.feature_cfg = fe_cfg

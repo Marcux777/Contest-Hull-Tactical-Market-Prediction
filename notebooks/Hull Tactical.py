@@ -1183,6 +1183,7 @@ sys.path.insert(0, '.')
 from hull_tactical.features import *  # noqa: F401,F403
 
 import hull_tactical.models as hm
+from hull_tactical import pipeline
 from hull_tactical.models import (  # noqa: F401,F403
     evaluate_baselines,
     constant_allocation_cv,
@@ -1218,6 +1219,20 @@ hm.BEST_PARAMS = BEST_PARAMS
 hm.ALLOC_K = ALLOC_K
 hm.MIN_INVESTMENT = MIN_INVESTMENT
 hm.MAX_INVESTMENT = MAX_INVESTMENT
+
+# Pipeline de alto nível (mantém notebook alinhado ao src/hull_tactical)
+PIPELINE_FEATURE_SET = "D_intentional"
+PIPELINE_CFG = hm.default_config()
+
+
+def run_pipeline_allocations(feature_set: str = PIPELINE_FEATURE_SET, cfg=None):
+    cfg_use = cfg or PIPELINE_CFG
+    return pipeline.train_pipeline(
+        df_train=train,
+        df_test=test,
+        feature_set=feature_set,
+        cfg=cfg_use,
+    )
 
 # %% [markdown]
 # ## 8. Validação temporal (Sharpe ajustado oficial)
