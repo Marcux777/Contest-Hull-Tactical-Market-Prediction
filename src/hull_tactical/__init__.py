@@ -1,0 +1,47 @@
+"""Hull Tactical package: data loading, features, models, pipelines."""
+from . import data, features, models, pipeline
+from .models import (
+    ALLOC_K,
+    BEST_PARAMS,
+    FEATURE_CFG_DEFAULT,
+    INTENTIONAL_CFG,
+    IS_SCORED_COL,
+    MARKET_COL,
+    MAX_INVESTMENT,
+    MIN_INVESTMENT,
+    RF_COL,
+    SEED,
+    add_exp_log,
+    adjusted_sharpe_score,
+    blend_and_eval,
+    calibrate_k_from_cv_preds,
+    choose_scored_strategy,
+    clipping_sensitivity,
+    compute_sharpe_weights,
+    compute_strategy_returns,
+    constant_allocation_cv,
+    evaluate_baselines,
+    expanding_holdout_eval,
+    make_sample_weight,
+    make_time_splits,
+    map_return_to_alloc,
+    optimize_allocation_scale,
+    prepare_train_test_frames,
+    run_cv_preds,
+    sanity_shuffle_test,
+    set_data_columns,
+    stability_check,
+    summarize_cv_metrics,
+    time_cv_lightgbm,
+    time_cv_lightgbm_fitref,
+    time_cv_lightgbm_weighted,
+    train_full_and_predict_model,
+)
+from .features import *  # noqa: F401,F403
+
+__all__ = [
+    "data",
+    "features",
+    "models",
+    "pipeline",
+]

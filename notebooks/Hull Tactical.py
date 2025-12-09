@@ -1163,142 +1163,27 @@ import textwrap
 from pathlib import Path
 
 
-def materialize_module(src_path: Path, dest_path: Path, fallback_code: str | None = None) -> None:
-    """Copia módulo para o working dir; usa fallback_code quando não há arquivo de origem."""
-    if src_path.exists():
-        shutil.copy(src_path, dest_path)
-        print(f"{dest_path.name} materializado de {src_path}")
-        return
-    if fallback_code is not None:
-        dest_path.write_text(fallback_code)
-        print(f"{dest_path.name} materializado via fallback embutido (src ausente).")
-        return
-    raise FileNotFoundError(f"{src_path} não encontrado e sem fallback fornecido.")
+def materialize_package(src_dir: Path, dest_dir: Path) -> None:
+    """Copia um pacote inteiro para o working dir (útil no Kaggle offline)."""
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+    shutil.copytree(src_dir, dest_dir)
+    print(f"Pacote {dest_dir} materializado de {src_dir}")
 
 
-# Módulo de features (materializado para Kaggle/offline)
-FEATURES_SRC = Path('src/hull_features.py')
-if FEATURES_SRC.exists():
-    HULL_FEATURES_CODE = FEATURES_SRC.read_text()
+# Materializa o pacote hull_tactical (features + models) para uso no notebook/Kaggle
+PACKAGE_SRC = Path("src/hull_tactical")
+PACKAGE_DEST = Path("hull_tactical")
+if PACKAGE_SRC.exists():
+    materialize_package(PACKAGE_SRC, PACKAGE_DEST)
 else:
-    HULL_FEATURES_CODE = textwrap.dedent('''"""
-Feature engineering and preprocessing helpers for the Hull Tactical notebook.
-Kept dependency-free (pandas/numpy only) so they can run inside Kaggle without extra installs.
-"""
-from __future__ import annotations
+    raise FileNotFoundError("src/hull_tactical não encontrado; garanta que o repo está completo.")
 
-import numpy as np
-import pandas as pd
-
-SEED = 42
-
-INTENTIONAL_DEFAULTS = {
-    "clip_bounds": (-0.05, 0.05),  # deterministic clipping on lagged excess return
-    "tanh_scale": 1.0,  # scale before tanh
-    "zscore_window": 20,  # std window for lagged z-score
-    "zscore_clip": 5.0,  # limit for z-score truncation
-}
-INTENTIONAL_CFG = dict(INTENTIONAL_DEFAULTS)
-
-FEATURE_CFG_DEFAULT = {
-    "winsor_quantile": 0.995,  # bilateral clipping for highly skewed features
-    "skew_threshold": 3.0,  # apply winsor if |skew| >= threshold
-    "add_family_medians": True,
-    "add_ratios": True,  # mean/std and mean-median per family
-    "add_diffs": True,  # mean-std per family
-    "use_extended_set": True,  # expose set E_fe_oriented
-}
-
-
-def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[str]]:
-    sort_key = "date_id" if "date_id" in df.columns else None
-    df_sorted = df.sort_values(sort_key) if sort_key else df.copy()
-    if df_sorted.columns.has_duplicates:
-        df_sorted = df_sorted.loc[:, ~df_sorted.columns.duplicated()]
-    numeric_cols = df_sorted.select_dtypes(include=[np.number]).columns.tolist()
-    drop_cols = {target, "row_id", "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
-    for col in ["date_id", "is_scored"]:
-        if col in df_sorted.columns:
-            drop_cols.add(col)
-    feature_cols = [c for c in numeric_cols if c not in drop_cols]
-    feature_cols = [c for c in feature_cols if df_sorted[c].nunique() > 1]
-    return df_sorted, feature_cols
-
-
-def preprocess_basic(df: pd.DataFrame, feature_cols: list[str], ref_cols: list[str] | None = None) -> tuple[pd.DataFrame, list[str]]:
-    feature_cols = list(dict.fromkeys(feature_cols))
-    feature_frame = df.reindex(columns=feature_cols)
-    medians = feature_frame.median()
-    filled = feature_frame.fillna(medians).fillna(0)
-
-    missing_mask = feature_frame.isna()
-    if missing_mask.columns.has_duplicates:
-        missing_mask = missing_mask.loc[:, ~missing_mask.columns.duplicated()]
-    flag_source_cols = []
-    for c in feature_cols:
-        mask_c = missing_mask[c]
-        has_nan = mask_c.any().any() if isinstance(mask_c, pd.DataFrame) else bool(mask_c.any())
-        if has_nan:
-            flag_source_cols.append(c)
-    flags_df = None
-    if flag_source_cols:
-        flag_unique = list(dict.fromkeys(flag_source_cols))
-        flags_df = missing_mask[flag_unique].astype(int)
-        flags_df.columns = [f"{c}_was_nan" for c in flag_unique]
-
-    parts = [filled]
-    if flags_df is not None:
-        parts.append(flags_df)
-    df_proc = pd.concat(parts, axis=1)
-
-    if df_proc.columns.has_duplicates:
-        df_proc = df_proc.loc[:, ~df_proc.columns.duplicated()]
-    keep = [col for col in df_proc.columns if df_proc[col].std(ddof=0) > 1e-9]
-    out = df_proc[keep] if ref_cols is None else df_proc.reindex(columns=ref_cols, fill_value=0)
-    return out, list(out.columns)
-
-
-__all__ = [
-    "INTENTIONAL_DEFAULTS",
-    "INTENTIONAL_CFG",
-    "FEATURE_CFG_DEFAULT",
-    "prepare_features",
-    "preprocess_basic",
-    "time_split",
-    "append_columns",
-    "add_missing_columns",
-    "align_feature_frames",
-    "add_lagged_market_features",
-    "add_family_aggs",
-    "add_regime_features",
-    "add_intentional_features",
-    "winsorize_skewed_features",
-    "add_ratio_diff_features",
-    "apply_feature_engineering",
-    "add_finance_combos",
-    "add_cross_sectional_norms",
-    "add_surprise_features",
-    "build_feature_sets",
-    "make_features",
-    "build_features",
-]
-''')
-
-HULL_FEATURES_PATH = Path('hull_features.py')
-materialize_module(FEATURES_SRC, HULL_FEATURES_PATH, fallback_code=HULL_FEATURES_CODE)
-
-# %%
 sys.path.insert(0, '.')
-from hull_features import *  # noqa: F401,F403
+from hull_tactical.features import *  # noqa: F401,F403
 
-# %%
-# Módulo de modelagem (materializado de src para Kaggle/offline)
-MODEL_SRC = Path("src/hull_modeling.py")
-MODEL_DEST = Path("hull_modeling.py")
-materialize_module(MODEL_SRC, MODEL_DEST)
-
-import hull_modeling as hm
-from hull_modeling import (  # noqa: F401,F403
+import hull_tactical.models as hm
+from hull_tactical.models import (  # noqa: F401,F403
     evaluate_baselines,
     constant_allocation_cv,
     time_cv_lightgbm_fitref,
