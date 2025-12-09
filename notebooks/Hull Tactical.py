@@ -1320,7 +1320,7 @@ cv_metrics = {}
 stability_reports = {}
 for name, cols in feature_sets.items():
     print(f"\n==== CV para {name} ({len(cols)} features) ====")
-    cv_metrics[name] = time_cv_lightgbm(_df, cols, target_col, n_splits=5)
+    cv_metrics[name] = pipeline.run_time_cv(train, feature_set=name, target_col=target_col, cfg=PIPELINE_CFG, n_splits=5, val_frac=0.10)
     sanity_shuffle_test(_df, cols, target_col, n_splits=3)
     stability_reports[name] = stability_check(_df, cols, target_col, configs=[(5, 0.1), (4, 0.15), (6, 0.10)])
 

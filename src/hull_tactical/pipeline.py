@@ -117,3 +117,28 @@ def choose_best_training_variant(
 
 
 __all__ = ["train_pipeline", "make_submission_csv", "choose_best_training_variant"]
+
+
+def run_time_cv(
+    df_train,
+    feature_set: str,
+    target_col: str = "target",
+    cfg: m.HullConfig | None = None,
+    n_splits: int = 5,
+    val_frac: float = 0.1,
+):
+    """
+    Wrapper para rodar CV temporal com o feature set escolhido usando o pipeline de features oficial.
+    Retorna a lista de métricas (uma por fold).
+    """
+    cfg_use = cfg or default_config()
+    train_fe, _, feature_cols, feature_sets, feature_used = features.make_features(
+        df_train,
+        test_df=None,
+        target_col=target_col,
+        feature_set=feature_set,
+        intentional_cfg=cfg_use.intentional_cfg,
+        fe_cfg=cfg_use.feature_cfg,
+    )
+    cols = feature_sets.get(feature_used, feature_cols)
+    return m.time_cv_lightgbm(train_fe, cols, target_col, n_splits=n_splits, val_frac=val_frac, cfg=cfg_use)
