@@ -4,6 +4,7 @@ Kept dependency-light so it can run inside Kaggle without extra installs.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -61,6 +62,37 @@ BEST_PARAMS = {
 }
 
 
+@dataclass
+class HullConfig:
+    market_col: str | None = MARKET_COL
+    rf_col: str | None = RF_COL
+    is_scored_col: str | None = IS_SCORED_COL
+    intentional_cfg: dict | None = None
+    feature_cfg: dict | None = None
+    best_params: dict | None = None
+    alloc_k: float = ALLOC_K
+    min_investment: float = MIN_INVESTMENT
+    max_investment: float = MAX_INVESTMENT
+
+
+def default_config() -> HullConfig:
+    return HullConfig(
+        market_col=MARKET_COL,
+        rf_col=RF_COL,
+        is_scored_col=IS_SCORED_COL,
+        intentional_cfg=dict(INTENTIONAL_CFG),
+        feature_cfg=dict(FEATURE_CFG_DEFAULT),
+        best_params=dict(BEST_PARAMS),
+        alloc_k=ALLOC_K,
+        min_investment=MIN_INVESTMENT,
+        max_investment=MAX_INVESTMENT,
+    )
+
+
+def _resolve_cfg(cfg: HullConfig | None) -> HullConfig:
+    return cfg if cfg is not None else default_config()
+
+
 def set_data_columns(market_col: str | None = None, rf_col: str | None = None, is_scored_col: str | None = None) -> None:
     """Setter explícito para colunas-chave; evita depender de globais implícitas."""
     global MARKET_COL, RF_COL, IS_SCORED_COL
@@ -69,8 +101,12 @@ def set_data_columns(market_col: str | None = None, rf_col: str | None = None, i
     IS_SCORED_COL = is_scored_col or IS_SCORED_COL
 
 
-def evaluate_baselines(train_df, feature_cols, target_col):
+def evaluate_baselines(train_df, feature_cols, target_col, cfg: HullConfig | None = None):
     """Baselines simples em split 80/20: alocação constante e modelo linear (Ridge)."""
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     tr_frac = int(len(train_df) * 0.8)
     tr = train_df.iloc[:tr_frac].copy()
     va = train_df.iloc[tr_frac:].copy()
@@ -85,18 +121,18 @@ def evaluate_baselines(train_df, feature_cols, target_col):
 
     alloc_const = pd.Series(1.0, index=va.index)
     sharpe_const, const_details = adjusted_sharpe_score(
-        va, alloc_const, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+        va, alloc_const, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
     )
 
     lin = Ridge(alpha=1.0, random_state=SEED)
     lin.fit(X_tr, y_tr)
     pred_lin = lin.predict(X_va)
     best_k_lin, best_alpha_lin, _ = optimize_allocation_scale(
-        pred_lin, va, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+        pred_lin, va, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
     )
     alloc_lin = map_return_to_alloc(pred_lin, k=best_k_lin, intercept=best_alpha_lin)
     sharpe_lin, lin_details = adjusted_sharpe_score(
-        va, pd.Series(alloc_lin, index=va.index), market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+        va, pd.Series(alloc_lin, index=va.index), market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
     )
     rmse_lin = mean_squared_error(y_va, pred_lin) ** 0.5
 
@@ -112,8 +148,12 @@ def evaluate_baselines(train_df, feature_cols, target_col):
     }
 
 
-def constant_allocation_cv(df, n_splits=5, val_frac=0.1):
+def constant_allocation_cv(df, n_splits=5, val_frac=0.1, cfg: HullConfig | None = None):
     """Baseline: alocação constante (1.0) por fold temporal."""
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
     metrics = []
     for i, (mask_tr, mask_val) in enumerate(splits, 1):
@@ -122,9 +162,9 @@ def constant_allocation_cv(df, n_splits=5, val_frac=0.1):
             continue
         alloc_const = pd.Series(1.0, index=df_val.index)
         sharpe_const, details = adjusted_sharpe_score(
-            df_val, alloc_const, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+            df_val, alloc_const, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
-        n_scored = int(df_val[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in df_val.columns else len(df_val)
+        n_scored = int(df_val[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val.columns else len(df_val)
         metrics.append(
             {
                 "fold": i,
@@ -145,13 +185,18 @@ def time_cv_lightgbm_fitref(
     val_frac=0.12,
     params_override=None,
     num_boost_round=200,
+    cfg: HullConfig | None = None,
 ):
     """CV temporal recalculando features por fold (winsor/clipping/z-score usando apenas o treino)."""
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
     metrics = []
     if not splits:
         return metrics
-    params_use = dict(BEST_PARAMS)
+    params_use = dict(cfg_resolved.best_params or BEST_PARAMS)
     if params_override:
         params_use.update(params_override)
     params_use["metric"] = "rmse"
@@ -186,11 +231,11 @@ def time_cv_lightgbm_fitref(
         model.fit(X_tr, y_tr)
         pred_val = model.predict(X_val)
         best_k, best_alpha, _ = optimize_allocation_scale(
-            pred_val, df_val_fe, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+            pred_val, df_val_fe, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
         alloc_val = map_return_to_alloc(pred_val, k=best_k, intercept=best_alpha)
         sharpe_val, details = adjusted_sharpe_score(
-            df_val_fe, alloc_val, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+            df_val_fe, alloc_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
         metrics.append(
             {
@@ -198,7 +243,7 @@ def time_cv_lightgbm_fitref(
                 "sharpe": sharpe_val,
                 "best_k": best_k,
                 "best_alpha": best_alpha,
-                "n_scored": int(df_val_fe[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in df_val_fe.columns else len(df_val_fe),
+                "n_scored": int(df_val_fe[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val_fe.columns else len(df_val_fe),
                 "strategy_vol": details.get("strategy_vol"),
             }
         )
@@ -379,7 +424,12 @@ def time_cv_lightgbm(
     weight_unscored=None,
     train_only_scored=False,
     log_prefix="",
+    cfg: HullConfig | None = None,
 ):
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
     metrics = []
     use_weights = weight_scored is not None or weight_unscored is not None
@@ -389,8 +439,8 @@ def time_cv_lightgbm(
     for i, (mask_tr, mask_val) in enumerate(splits, 1):
         df_tr = df.loc[mask_tr].copy()
         df_val = df.loc[mask_val].copy()
-        if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in df_tr.columns:
-            df_tr = df_tr.loc[df_tr[IS_SCORED_COL] == 1]
+        if train_only_scored and is_scored_col and is_scored_col in df_tr.columns:
+            df_tr = df_tr.loc[df_tr[is_scored_col] == 1]
             if df_tr.empty:
                 print(f"{prefix}Fold {i}: treino ficou vazio após filtrar is_scored==1; pulando.")
                 continue
@@ -404,11 +454,11 @@ def time_cv_lightgbm(
         X_val = df_val_proc.drop(columns=[target_col], errors="ignore")
         y_val = df_val[target_col]
 
-        train_weight = make_sample_weight(df_tr_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
-        val_weight = make_sample_weight(df_val_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
+        train_weight = make_sample_weight(df_tr_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored, is_scored_col=is_scored_col) if use_weights else None
+        val_weight = make_sample_weight(df_val_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored, is_scored_col=is_scored_col) if use_weights else None
         train_ds = lgb.Dataset(X_tr, label=y_tr, weight=train_weight)
         val_ds = lgb.Dataset(X_val, label=y_val, weight=val_weight, reference=train_ds)
-        params = dict(BEST_PARAMS)
+        params = dict(cfg_resolved.best_params or BEST_PARAMS)
         if params_override:
             params.update(params_override)
         model = lgb.train(
@@ -422,27 +472,27 @@ def time_cv_lightgbm(
         best_iter = model.best_iteration or model.current_iteration()
         pred_val = model.predict(X_val, num_iteration=best_iter)
         best_k, best_alpha, _ = optimize_allocation_scale(
-            pred_val, df_val, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+            pred_val, df_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
         alloc_val = map_return_to_alloc(pred_val, k=best_k, intercept=best_alpha)
         sharpe_adj, details = adjusted_sharpe_score(
             df_val,
             pd.Series(alloc_val, index=df_val.index),
-            market_col=MARKET_COL,
-            rf_col=RF_COL,
-            is_scored_col=IS_SCORED_COL,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
         )
 
         n_val = len(X_val)
         n_scored = (
-            int(df_val[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in df_val.columns else n_val
+            int(df_val[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val.columns else n_val
         )
         if n_scored < min_scored:
             print(
                 f"Aviso: fold {i} tem poucas linhas is_scored ({n_scored}); considere ajustar n_splits/val_frac."
             )
         const_sharpe, _ = adjusted_sharpe_score(
-            df_val, pd.Series(1.0, index=df_val.index), market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+            df_val, pd.Series(1.0, index=df_val.index), market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
         if pd.isna(sharpe_adj) or sharpe_adj == -np.inf:
             print(f"Fold {i}: sem score válido; pulando.")
@@ -504,10 +554,12 @@ def summarize_cv_metrics(metrics):
     }
 
 
-def make_sample_weight(df, weight_scored=1.0, weight_unscored=0.2):
+def make_sample_weight(df, weight_scored=1.0, weight_unscored=0.2, is_scored_col: str | None = None):
     weight_uns = weight_scored if weight_unscored is None else weight_unscored
-    if IS_SCORED_COL and IS_SCORED_COL in df.columns:
-        return df[IS_SCORED_COL].map({1: weight_scored, 0: weight_uns}).fillna(weight_uns).to_numpy()
+    if is_scored_col is None and IS_SCORED_COL in df.columns:
+        is_scored_col = IS_SCORED_COL
+    if is_scored_col:
+        return df[is_scored_col].map({1: weight_scored, 0: weight_uns}).fillna(weight_uns).to_numpy()
     return np.ones(len(df)) * weight_scored
 
 
@@ -521,6 +573,7 @@ def time_cv_lightgbm_weighted(
     num_boost_round=200,
     weight_scored=1.0,
     weight_unscored=0.2,
+    cfg: HullConfig | None = None,
 ):
     """CV temporal com pesos para is_scored (treino ponderado; avaliação segue métrica oficial)."""
     metrics = time_cv_lightgbm(
@@ -534,6 +587,7 @@ def time_cv_lightgbm_weighted(
         weight_scored=weight_scored,
         weight_unscored=weight_unscored,
         log_prefix="[weighted]",
+        cfg=cfg,
     )
     return metrics
 
@@ -564,7 +618,12 @@ def run_cv_preds(
     weight_scored=None,
     weight_unscored=None,
     train_only_scored=False,
+    cfg: HullConfig | None = None,
 ):
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
     metrics, preds = [], []
     seed_use = SEED if seed is None else seed
@@ -575,8 +634,8 @@ def run_cv_preds(
     for i, (mask_tr, mask_val) in enumerate(splits, 1):
         df_tr = df.loc[mask_tr].copy()
         df_val = df.loc[mask_val].copy()
-        if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in df_tr.columns:
-            df_tr = df_tr.loc[df_tr[IS_SCORED_COL] == 1]
+        if train_only_scored and is_scored_col and is_scored_col in df_tr.columns:
+            df_tr = df_tr.loc[df_tr[is_scored_col] == 1]
             if df_tr.empty:
                 continue
         df_tr_aligned, df_val_aligned, cols_use = align_feature_frames(df_tr, df_val, feature_cols)
@@ -587,10 +646,10 @@ def run_cv_preds(
         X_val = df_val_proc.drop(columns=[target_col], errors="ignore")
         y_val = df_val[target_col]
 
-        train_weight = make_sample_weight(df_tr_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
-        val_weight = make_sample_weight(df_val_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored) if use_weights else None
+        train_weight = make_sample_weight(df_tr_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored, is_scored_col=is_scored_col) if use_weights else None
+        val_weight = make_sample_weight(df_val_aligned, weight_scored=weight_scored, weight_unscored=weight_unscored, is_scored_col=is_scored_col) if use_weights else None
         if model_kind == "lgb":
-            params_use = dict(BEST_PARAMS)
+            params_use = dict(cfg_resolved.best_params or BEST_PARAMS)
             if params:
                 params_use.update(params)
             params_use["seed"] = seed_use
@@ -650,18 +709,18 @@ def run_cv_preds(
             continue
 
         best_k, best_alpha, _ = optimize_allocation_scale(
-            pred, df_val, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+            pred, df_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
         alloc = map_return_to_alloc(pred, k=best_k, intercept=best_alpha)
         sharpe_adj, details = adjusted_sharpe_score(
             df_val,
             pd.Series(alloc, index=df_val.index),
-            market_col=MARKET_COL,
-            rf_col=RF_COL,
-            is_scored_col=IS_SCORED_COL,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
         )
         n_scored = (
-            int(df_val[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in df_val.columns else len(df_val)
+            int(df_val[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val.columns else len(df_val)
         )
         if pd.isna(sharpe_adj) or sharpe_adj == -np.inf:
             continue
@@ -683,9 +742,9 @@ def run_cv_preds(
                     "alloc": alloc,
                     "pred_return": pred,
                     "target": y_val,
-                    "forward_returns": df_val.get(MARKET_COL),
-                    "risk_free_rate": df_val.get(RF_COL),
-                    "is_scored": df_val[IS_SCORED_COL] if IS_SCORED_COL and IS_SCORED_COL in df_val.columns else 1,
+                    "forward_returns": df_val.get(market_col),
+                    "risk_free_rate": df_val.get(rf_col),
+                    "is_scored": df_val[is_scored_col] if is_scored_col and is_scored_col in df_val.columns else 1,
                     "fold": i,
                     "seed": seed_use,
                 },
@@ -724,8 +783,20 @@ def calibrate_k_from_cv_preds(pred_df, k_grid=None, intercept=1.0):
 
 
 def expanding_holdout_eval(
-    df, feature_cols, target, holdout_frac=0.12, train_only_scored=False, label="holdout", use_weights=False, weight_unscored=0.2
+    df,
+    feature_cols,
+    target,
+    holdout_frac=0.12,
+    train_only_scored=False,
+    label="holdout",
+    use_weights=False,
+    weight_unscored=0.2,
+    cfg: HullConfig | None = None,
 ):
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     if "date_id" in df.columns:
         df_sorted = df.sort_values("date_id")
     else:
@@ -733,8 +804,8 @@ def expanding_holdout_eval(
     n_hold = max(1, int(len(df_sorted) * holdout_frac))
     train_part = df_sorted.iloc[:-n_hold]
     holdout_part = df_sorted.iloc[-n_hold:]
-    if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in train_part.columns:
-        train_part = train_part.loc[train_part[IS_SCORED_COL] == 1]
+    if train_only_scored and is_scored_col and is_scored_col in train_part.columns:
+        train_part = train_part.loc[train_part[is_scored_col] == 1]
     if len(train_part) == 0 or len(holdout_part) == 0:
         return None
 
@@ -745,14 +816,14 @@ def expanding_holdout_eval(
     y_tr = train_part[target]
     X_ho = ho_proc.drop(columns=[target], errors="ignore")
 
-    train_weight = make_sample_weight(train_aligned, weight_scored=1.0, weight_unscored=weight_unscored) if use_weights else None
-    params = {"objective": "regression", "metric": "rmse", **BEST_PARAMS}
+    train_weight = make_sample_weight(train_aligned, weight_scored=1.0, weight_unscored=weight_unscored, is_scored_col=is_scored_col) if use_weights else None
+    params = {"objective": "regression", "metric": "rmse", **(cfg_resolved.best_params or BEST_PARAMS)}
     model = lgb.train(params, lgb.Dataset(X_tr, label=y_tr, weight=train_weight), num_boost_round=200)
     pred_ho = model.predict(X_ho)
-    best_k, best_alpha, _ = optimize_allocation_scale(pred_ho, holdout_part, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL)
+    best_k, best_alpha, _ = optimize_allocation_scale(pred_ho, holdout_part, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col)
     alloc_ho = map_return_to_alloc(pred_ho, k=best_k, intercept=best_alpha)
     sharpe_ho, details = adjusted_sharpe_score(
-        holdout_part, alloc_ho, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
+        holdout_part, alloc_ho, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
     )
     return {
         "label": label,
@@ -763,7 +834,7 @@ def expanding_holdout_eval(
         "alpha_best": best_alpha,
         "n_train": len(train_part),
         "n_holdout": len(holdout_part),
-        "n_scored_holdout": int(holdout_part[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in holdout_part.columns else len(holdout_part),
+        "n_scored_holdout": int(holdout_part[is_scored_col].sum()) if is_scored_col and is_scored_col in holdout_part.columns else len(holdout_part),
         "weight_unscored": weight_unscored if use_weights else None,
     }
 
@@ -864,8 +935,13 @@ def train_full_and_predict_model(
     df_train_fe=None,
     df_test_fe=None,
     feature_set=None,
+    cfg: HullConfig | None = None,
 ):
     """Aplica pipeline de features compartilhado com a CV, treina modelo especificado e retorna alocação."""
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     seed_use = SEED if seed is None else seed
     np.random.seed(seed_use)
     prep = prepare_train_test_frames(
@@ -873,18 +949,19 @@ def train_full_and_predict_model(
         df_test,
         feature_cols,
         target_col,
-        intentional_cfg=intentional_cfg,
-        fe_cfg=fe_cfg,
+        intentional_cfg=intentional_cfg or cfg_resolved.intentional_cfg,
+        fe_cfg=fe_cfg or cfg_resolved.feature_cfg,
         feature_set=feature_set,
         train_only_scored=train_only_scored,
         weight_scored=weight_scored,
         weight_unscored=weight_unscored,
         df_train_fe=df_train_fe,
         df_test_fe=df_test_fe,
+        is_scored_col=is_scored_col,
     )
 
     if model_kind == "lgb":
-        params_use = dict(BEST_PARAMS)
+        params_use = dict(cfg_resolved.best_params or BEST_PARAMS)
         if params:
             params_use.update(params)
         params_use["seed"] = seed_use
@@ -938,7 +1015,7 @@ def train_full_and_predict_model(
     else:
         raise ValueError(f"Modelo {model_kind} não suportado ou dependência ausente.")
 
-    k_use = alloc_k if alloc_k is not None else ALLOC_K
+    k_use = alloc_k if alloc_k is not None else cfg_resolved.alloc_k
     alloc_test = map_return_to_alloc(pred_test, k=k_use, intercept=alloc_alpha)
     return pd.Series(alloc_test, index=prep["df_test_index"])
 
@@ -956,9 +1033,13 @@ def prepare_train_test_frames(
     weight_unscored=None,
     df_train_fe=None,
     df_test_fe=None,
+    is_scored_col: str | None = None,
+    cfg: HullConfig | None = None,
 ):
     """Prepara matrizes X/y de treino e teste com pipeline de features compartilhado."""
-    fe_cfg_use = FEATURE_CFG_DEFAULT if fe_cfg is None else fe_cfg
+    cfg_resolved = _resolve_cfg(cfg)
+    is_scored_col = is_scored_col or cfg_resolved.is_scored_col or IS_SCORED_COL
+    fe_cfg_use = cfg_resolved.feature_cfg if fe_cfg is None else fe_cfg
     feature_cols_use = list(feature_cols) if feature_cols is not None else None
     use_weights = weight_scored is not None or weight_unscored is not None
     weight_scored = 1.0 if weight_scored is None else weight_scored
@@ -1005,7 +1086,12 @@ def prepare_train_test_frames(
     y_tr = df_train_raw.loc[df_train_proc.index, target_col]
     X_te = df_test_proc.drop(columns=[target_col], errors="ignore")
     train_weight = (
-        make_sample_weight(df_train_raw.loc[df_train_proc.index], weight_scored=weight_scored, weight_unscored=weight_unscored)
+        make_sample_weight(
+            df_train_raw.loc[df_train_proc.index],
+            weight_scored=weight_scored,
+            weight_unscored=weight_unscored,
+            is_scored_col=is_scored_col,
+        )
         if use_weights
         else None
     )

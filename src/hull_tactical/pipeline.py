@@ -5,12 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import data, features
-from .models import (
-    BEST_PARAMS,
-    FEATURE_CFG_DEFAULT,
-    INTENTIONAL_CFG,
-    train_full_and_predict_model,
-)
+from .models import FEATURE_CFG_DEFAULT, INTENTIONAL_CFG, default_config, train_full_and_predict_model
 
 
 def train_pipeline(
@@ -20,9 +15,12 @@ def train_pipeline(
     intentional_cfg: dict | None = None,
 ):
     """Minimal train pipeline using existing feature/model helpers."""
+    cfg = default_config()
     df_train, df_test = data.load_raw_data(data_dir)
-    fe_cfg = FEATURE_CFG_DEFAULT if feature_cfg is None else feature_cfg
-    intent_cfg = INTENTIONAL_CFG if intentional_cfg is None else intentional_cfg
+    fe_cfg = feature_cfg or cfg.feature_cfg or FEATURE_CFG_DEFAULT
+    intent_cfg = intentional_cfg or cfg.intentional_cfg or INTENTIONAL_CFG
+    cfg.feature_cfg = fe_cfg
+    cfg.intentional_cfg = intent_cfg
     train_fe, test_fe, feature_cols, feature_sets, feature_used = features.make_features(
         df_train,
         test_df=df_test,
@@ -37,7 +35,7 @@ def train_pipeline(
         feature_cols,
         target_col="target",
         model_kind="lgb",
-        params=BEST_PARAMS,
+        params=cfg.best_params,
         alloc_k=None,
         alloc_alpha=1.0,
         intentional_cfg=intent_cfg,
@@ -45,6 +43,7 @@ def train_pipeline(
         df_train_fe=train_fe,
         df_test_fe=test_fe,
         feature_set=feature_used,
+        cfg=cfg,
     )
     return allocations
 
