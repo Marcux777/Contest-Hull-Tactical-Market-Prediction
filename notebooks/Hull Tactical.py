@@ -1171,13 +1171,35 @@ def materialize_package(src_dir: Path, dest_dir: Path) -> None:
     print(f"Pacote {dest_dir} materializado de {src_dir}")
 
 
-# Materializa o pacote hull_tactical (features + models) para uso no notebook/Kaggle
-PACKAGE_SRC = Path("src/hull_tactical")
+# Materializa o pacote hull_tactical (features + models) para uso no notebook/Kaggle.
+# Robustez extra: tenta importar primeiro; se falhar, procura em diretórios parentes.
 PACKAGE_DEST = Path("hull_tactical")
-if PACKAGE_SRC.exists():
+
+def find_package_src(max_up=3) -> Path | None:
+    candidates = []
+    cwd = Path.cwd()
+    for base in [cwd] + list(cwd.parents)[:max_up]:
+        candidates.append(base / "src" / "hull_tactical")
+    for cand in candidates:
+        try:
+            if cand.exists():
+                return cand
+        except Exception:
+            continue
+    return None
+
+try:
+    import hull_tactical as _ht  # type: ignore
+    PACKAGE_AVAILABLE = True
+    print("Pacote hull_tactical já disponível; pulando materialização.")
+except Exception:
+    PACKAGE_AVAILABLE = False
+
+if not PACKAGE_AVAILABLE:
+    PACKAGE_SRC = find_package_src()
+    if PACKAGE_SRC is None:
+        raise FileNotFoundError("src/hull_tactical não encontrado; garanta que o repo está completo ou adicione o pacote ao ambiente.")
     materialize_package(PACKAGE_SRC, PACKAGE_DEST)
-else:
-    raise FileNotFoundError("src/hull_tactical não encontrado; garanta que o repo está completo.")
 
 sys.path.insert(0, '.')
 from hull_tactical.features import *  # noqa: F401,F403
