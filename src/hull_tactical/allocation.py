@@ -5,7 +5,7 @@ competition metric (adjusted Sharpe), not as a small detail.
 
 This module is dependency-light (numpy/pandas only). It expects the caller to
 provide a DataFrame with market/rf/is_scored columns compatible with
-`hull_tactical.models.adjusted_sharpe_score`.
+`hull_tactical.metric.adjusted_sharpe_score`.
 """
 
 from __future__ import annotations
@@ -224,7 +224,7 @@ def calibrate_global_scale(
     cfg = cfg or AllocationConfig()
 
     # Local import to keep this module dependency-light.
-    from .models import adjusted_sharpe_score
+    from .metric import adjusted_sharpe_score
 
     k_grid = cfg.resolved_k_grid()
     alpha_grid = cfg.resolved_alpha_grid()

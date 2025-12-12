@@ -11,7 +11,9 @@ jupytext>=1.16
 
 # Tooling
 pytest>=7.0
-kaggle>=1.6
+
+# Kaggle CLI (optional, only for local data download; never store creds in-repo)
+# kaggle>=1.6
 
 # Optional (used in research notebook only)
 # optuna>=3.0

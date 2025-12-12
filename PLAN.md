@@ -81,3 +81,10 @@
   - [x] 4.2: Congelar policy `is_scored` em `configs/run.yaml` e aplicar em CV/treino final.
   - [x] 4.3: Calibração global OOF (k/alpha) + smoothing/vol-targeting via `AllocationConfig`.
   - [x] 4.4: Manter `02_submission` simples (bagging leve + allocation única).
+- [x] Kaggle-ready (Code Submission / ambiente restrito)
+  - [x] Remover qualquer fluxo de credenciais Kaggle do notebook/repo (sem criação de `kaggle.json`).
+  - [x] Garantir que leitura use `/kaggle/input/...` no Kaggle e escrita vá para `/kaggle/working/...` (sem tentar gravar em `/kaggle/input`).
+  - [x] Separar scripts: `train.py` (offline, salva artefatos) e `infer.py` (só inferência, rápido).
+  - [x] Extrair `metric.py` com a métrica oficial (sem depender de `models.py`).
+  - [x] Garantir `features.py` causal (sem leakage) e documentar invariantes.
+  - [x] Smoke-check: `python scripts/scan_secrets.py --history` + `pytest`.

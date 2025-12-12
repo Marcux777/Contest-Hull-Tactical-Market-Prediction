@@ -25,17 +25,29 @@ class DataPaths:
     zip_path: Path
 
 
+def running_on_kaggle() -> bool:
+    """Heuristic to detect Kaggle runtimes (read-only /kaggle/input + writable /kaggle/working)."""
+    return Path("/kaggle/input").exists() and Path("/kaggle/working").exists()
+
+
 def pick_data_dir(env_var: str = "HT_DATA_DIR") -> Path:
     env_val = os.environ.get(env_var)
     env_dir = Path(env_val) if env_val else None
     if env_dir:
+        if running_on_kaggle():
+            try:
+                if Path("/kaggle/input") in env_dir.resolve().parents or env_dir.resolve() == Path("/kaggle/input"):
+                    return Path("/kaggle/working/data")
+            except Exception:
+                pass
         return env_dir
+    if running_on_kaggle():
+        # Prefer a writable location; inputs live under `/kaggle/input/<competition>/`.
+        return Path("/kaggle/working/data")
     candidates = [
-        Path("/kaggle/input/hull-tactical-market-prediction"),
         (Path("..").resolve() / "data"),
         (Path.cwd() / "data"),
         (Path.cwd().parent / "data"),
-        Path("/kaggle/working/data"),
         Path("/content/data"),
     ]
     for cand in candidates:
@@ -49,10 +61,16 @@ def pick_data_dir(env_var: str = "HT_DATA_DIR") -> Path:
 
 def get_data_paths(data_dir: Path | None = None, competition_slug: str = COMPETITION_SLUG) -> DataPaths:
     base = data_dir or pick_data_dir()
+    kaggle_input_dir = Path(f"/kaggle/input/{competition_slug}")
     raw_dir = base / "raw"
     submissions_dir = base / "submissions"
-    train_path = base / "train.csv"
-    test_path = base / "test.csv"
+    # On Kaggle, read train/test directly from `/kaggle/input/<competition>/`.
+    if kaggle_input_dir.exists() and (kaggle_input_dir / "train.csv").exists() and (kaggle_input_dir / "test.csv").exists():
+        train_path = kaggle_input_dir / "train.csv"
+        test_path = kaggle_input_dir / "test.csv"
+    else:
+        train_path = base / "train.csv"
+        test_path = base / "test.csv"
     raw_train_path = raw_dir / "train.csv"
     raw_test_path = raw_dir / "test.csv"
     zip_path = raw_dir / f"{competition_slug}.zip"
@@ -143,6 +161,7 @@ __all__ = [
     "COMPETITION_SLUG",
     "DataPaths",
     "pick_data_dir",
+    "running_on_kaggle",
     "get_data_paths",
     "download_competition_zip",
     "ensure_local_data",

@@ -12,7 +12,7 @@
 - Create/activate a virtual env (Python 3.10+ recommended), then install deps used in notebooks:
   - `pip install -r requirements.txt`
 - Sync notebook/script: `jupytext --sync notebooks/01_research.py` (ou `notebooks/02_submission.py`)
-- Fetch data via CLI (requires credentials): `kaggle competitions download -c hull-tactical-market-prediction -p data/raw`
+- Fetch data via CLI (local only): `kaggle competitions download -c hull-tactical-market-prediction -p data/raw`
 
 ## Coding Style & Naming Conventions
 - Python, 4-space indentation; keep cells/scripts concise and reusable.
@@ -29,7 +29,7 @@
 - PRs: state goal, key changes, and any data/metric impacts; link issues/tasks when applicable. Include screenshots/plots if UI or modeling results change.
 
 ## Security & Configuration Tips
-- Set Kaggle creds via env vars `KAGGLE_USERNAME`/`KAGGLE_KEY` (or pre-create `~/.kaggle/kaggle.json` with `chmod 600`); never commit keys.
+- Nunca commite credenciais Kaggle; se precisar do CLI localmente, use `~/.kaggle/kaggle.json` com `chmod 600`.
 - Large artifacts: prefer `.gitignore` entries; stage only minimal derived assets needed for review.
 
 ## Regras adicionais (manutenção)

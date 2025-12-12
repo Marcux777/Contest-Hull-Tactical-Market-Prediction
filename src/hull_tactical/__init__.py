@@ -5,6 +5,7 @@ imports like `from hull_tactical import pipeline` or `import hull_tactical.model
 """
 
 __all__ = [
+    "artifacts",
     "allocation",
     "competition",
     "config",
@@ -12,6 +13,7 @@ __all__ = [
     "ensemble",
     "features",
     "io",
+    "metric",
     "models",
     "pipeline",
 ]

@@ -35,6 +35,7 @@ from .features import (
     preprocess_basic,
 )
 from .allocation import AllocationConfig, apply_allocation_strategy, calibrate_global_scale
+from .metric import adjusted_sharpe_score, compute_strategy_returns
 from . import config as ht_config
 
 SEED = 42
@@ -620,82 +621,9 @@ def make_time_splits(df, date_col="date_id", n_splits=5, val_frac=0.1, min_train
         return splits
 
 
-def compute_strategy_returns(pred_alloc, market_returns):
-    return pred_alloc * market_returns
-
-
 def map_return_to_alloc(pred_return, k=ALLOC_K, intercept=1.0):
     """Aplica allocation=clip(intercept + k * pred, MIN_INVESTMENT, MAX_INVESTMENT); regra base 1 + k*pred."""
     return np.clip(intercept + k * pred_return, MIN_INVESTMENT, MAX_INVESTMENT)
-
-
-def adjusted_sharpe_score(
-    df,
-    allocation,
-    market_col=None,
-    rf_col=None,
-    is_scored_col=None,
-    trading_days_per_yr=252,
-    clip_alloc=True,
-):
-    """Replica a métrica oficial (modified Sharpe) aplicada só em linhas is_scored==1."""
-    market_use = market_col or MARKET_COL or "forward_returns"
-    rf_use = rf_col or RF_COL or "risk_free_rate"
-    scored_col = is_scored_col or IS_SCORED_COL
-
-    required = [market_use, rf_use]
-    if not all(col in df.columns for col in required):
-        return np.nan, {}
-
-    eval_df = df.copy()
-    if scored_col and scored_col in eval_df.columns:
-        eval_df = eval_df.loc[eval_df[scored_col] == 1].copy()
-    if len(eval_df) == 0:
-        return np.nan, {}
-
-    alloc_series = pd.Series(allocation, index=df.index)
-    if clip_alloc:
-        alloc_series = alloc_series.clip(MIN_INVESTMENT, MAX_INVESTMENT)
-    alloc_series = alloc_series.reindex(eval_df.index)
-
-    eval_df["position"] = alloc_series
-    strat_returns = eval_df[rf_use] * (1 - eval_df["position"]) + eval_df["position"] * eval_df[market_use]
-    strategy_excess = strat_returns - eval_df[rf_use]
-    strategy_excess_cum = (1 + strategy_excess).prod()
-    strategy_mean_excess = strategy_excess_cum ** (1 / len(eval_df)) - 1
-    strategy_std = strat_returns.std(ddof=0)
-
-    if strategy_std <= 0:
-        return -np.inf, {}
-
-    sharpe = strategy_mean_excess / (strategy_std + 1e-12) * np.sqrt(trading_days_per_yr)
-    strategy_vol = float(strategy_std * np.sqrt(trading_days_per_yr) * 100)
-
-    market_excess = eval_df[market_use] - eval_df[rf_use]
-    market_excess_cum = (1 + market_excess).prod()
-    market_mean_excess = market_excess_cum ** (1 / len(eval_df)) - 1
-    market_std = eval_df[market_use].std(ddof=0)
-    if market_std <= 0:
-        return -np.inf, {}
-    market_vol = float(market_std * np.sqrt(trading_days_per_yr) * 100)
-
-    excess_vol = max(0.0, strategy_vol / market_vol - 1.2) if market_vol > 0 else 0.0
-    vol_penalty = 1 + excess_vol
-
-    return_gap = max(0.0, (market_mean_excess - strategy_mean_excess) * 100 * trading_days_per_yr)
-    return_penalty = 1 + (return_gap**2) / 100
-
-    adjusted = sharpe / (vol_penalty * return_penalty)
-    details = {
-        "sharpe_raw": sharpe,
-        "strategy_vol": strategy_vol,
-        "market_vol": market_vol,
-        "strategy_mean_excess": strategy_mean_excess,
-        "market_mean_excess": market_mean_excess,
-        "vol_penalty": vol_penalty,
-        "return_penalty": return_penalty,
-    }
-    return float(min(adjusted, 1_000_000)), details
 
 
 def optimize_allocation_scale(
@@ -1679,7 +1607,10 @@ def prepare_train_test_frames(
     df_train_base, df_test_base, feature_cols_aligned = align_feature_frames(df_train_base, df_test_base, feature_cols_use)
 
     df_train_proc, keep_cols, medians = preprocess_basic(df_train_base, feature_cols_aligned)
-    df_test_proc, _, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols, ref_medians=medians)
+    if df_test_base is None:
+        df_test_proc = pd.DataFrame(index=df_train_proc.index[:0])
+    else:
+        df_test_proc, _, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols, ref_medians=medians)
     X_tr = df_train_proc.drop(columns=[target_col], errors="ignore")
     y_tr = df_train_raw.loc[df_train_proc.index, target_col]
     X_te = df_test_proc.drop(columns=[target_col], errors="ignore")
@@ -1701,6 +1632,8 @@ def prepare_train_test_frames(
         "df_test_base": df_test_base,
         "df_test_index": df_test_proc.index,
         "feature_cols": feature_cols_aligned,
+        "model_feature_cols": list(X_tr.columns),
+        "medians": medians,
         "train_weight": train_weight,
     }
 

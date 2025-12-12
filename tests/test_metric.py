@@ -7,7 +7,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import hull_tactical.models as hm  # noqa: E402
+import hull_tactical.metric as ht_metric  # noqa: E402
 
 
 def test_adjusted_sharpe_score_penalties_and_is_scored_filter():
@@ -21,7 +21,7 @@ def test_adjusted_sharpe_score_penalties_and_is_scored_filter():
     )
     alloc = pd.Series(2.0, index=df.index)
 
-    score, details = hm.adjusted_sharpe_score(
+    score, details = ht_metric.adjusted_sharpe_score(
         df,
         alloc,
         market_col="forward_returns",
@@ -34,7 +34,7 @@ def test_adjusted_sharpe_score_penalties_and_is_scored_filter():
     assert np.isfinite(details["sharpe_raw"])
 
     scored_mask = df["is_scored"] == 1
-    score_scored, _ = hm.adjusted_sharpe_score(
+    score_scored, _ = ht_metric.adjusted_sharpe_score(
         df.loc[scored_mask],
         alloc.loc[scored_mask],
         market_col="forward_returns",
@@ -43,4 +43,3 @@ def test_adjusted_sharpe_score_penalties_and_is_scored_filter():
     )
     assert np.isfinite(score_scored)
     assert np.isclose(score, score_scored)
-

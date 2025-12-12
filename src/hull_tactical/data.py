@@ -6,16 +6,23 @@ from typing import Tuple
 
 import pandas as pd
 
+from . import io
+
 DEFAULT_DATA_DIR = pathlib.Path("data")
 
 
 def load_raw_data(data_dir: pathlib.Path | str | None = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    base = pathlib.Path(data_dir) if data_dir else DEFAULT_DATA_DIR
-    train_path = base / "train.csv"
-    test_path = base / "test.csv"
-    if not train_path.exists() or not test_path.exists():
-        raise FileNotFoundError(f"Esperado train.csv e test.csv em {base.resolve()}")
-    return pd.read_csv(train_path), pd.read_csv(test_path)
+    """Loads train/test as DataFrames.
+
+    - Local: reads from `data_dir` (or `HT_DATA_DIR`/`./data`) and supports `raw/`.
+    - Kaggle: reads directly from `/kaggle/input/<competition>/train.csv|test.csv`.
+
+    Never triggers an automatic download (Kaggle API keys should stay out of the repo).
+    """
+    base = pathlib.Path(data_dir) if data_dir else None
+    paths = io.get_data_paths(base)
+    io.ensure_local_data(paths, download_if_missing=False)
+    return pd.read_csv(paths.train_path), pd.read_csv(paths.test_path)
 
 
 def train_valid_split(df: pd.DataFrame, valid_frac: float = 0.2, seed: int | None = 42):
