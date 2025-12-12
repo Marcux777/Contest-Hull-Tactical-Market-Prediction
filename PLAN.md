@@ -33,6 +33,7 @@
   - [x] Extrair helpers de feature/preprocess para `src/hull_features.py`.
   - [x] Materializar/importar `hull_features.py` dentro do notebook (compatível com Kaggle offline).
   - [x] Validar com `py_compile` + `jupytext --sync`.
+  - [x] Robustecer bootstrap de import do `src/` (Kaggle `/kaggle/input`, Colab `/content` e opção de auto-clone).
 - [ ] Corrigir CV fit_ref (ValueError em prepare_features)
   - [x] Identificar e remover/deduplicar colunas que ainda chegam duplicadas no fluxo do `time_cv_lightgbm_fitref`/`build_feature_sets`, evitando que `df_sorted[c]` retorne DataFrame e gere “truth value of a Series is ambiguous”.
   - [x] Validar `time_cv_lightgbm_fitref` rodando sem erros com o feature set `D_intentional` após o ajuste (ajuste aplicado; rodar a célula para confirmar em runtime).

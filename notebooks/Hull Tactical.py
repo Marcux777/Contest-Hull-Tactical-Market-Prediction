@@ -118,19 +118,205 @@ BEST_PARAMS = {
 
 # %%
 # Importa o pacote local (src/) para manter o notebook enxuto.
-# (Funciona tanto rodando do root quanto de dentro de `notebooks/`.)
+# (Funciona tanto rodando do root quanto de dentro de `notebooks/` e no Kaggle.)
+import os
 import sys
+import subprocess
+import shutil
 from pathlib import Path
 
-_cwd = Path.cwd()
-_src_dir = _cwd / "src"
-if not _src_dir.exists():
-    _src_dir = _cwd.parent / "src"
-if _src_dir.exists():
-    sys.path.insert(0, str(_src_dir))
+PROJECT_ROOT_OVERRIDE = ""  # ex.: "/content/<repo>" (Colab) ou "/kaggle/input/<dataset>/<repo>"
 
-from hull_tactical import competition as ht_comp
-from hull_tactical import io as ht_io
+def _running_in_colab() -> bool:
+    try:  # pragma: no cover
+        import google.colab  # type: ignore  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+AUTO_CLONE_REPO = _running_in_colab()  # Colab: clona o repo se `src/` não estiver disponível
+REPO_GIT_URL = "https://github.com/Marcux777/Hull-Tactical---Market-Prediction.git"
+REPO_CLONE_DIRNAME = "Hull-Tactical---Market-Prediction"
+
+def _find_src_dir_for_package(package_name: str = "hull_tactical") -> Path | None:
+    """Retorna o diretório `src/` que contém o pacote, se existir."""
+    def _walk_find_root(root: Path, *, max_depth: int, max_dirs: int, skip_names: set[str]) -> Path | None:
+        """Procura um root que contenha `src/<package_name>/__init__.py` com limites."""
+        try:
+            root_parts = root.resolve().parts
+        except Exception:
+            root_parts = root.parts
+
+        visited = 0
+        try:
+            for dirpath, dirnames, _filenames in os.walk(root, topdown=True):
+                visited += 1
+                if visited > max_dirs:
+                    break
+                dirpath_p = Path(dirpath)
+                try:
+                    dir_parts = dirpath_p.resolve().parts
+                except Exception:
+                    dir_parts = dirpath_p.parts
+                depth = len(dir_parts) - len(root_parts)
+                if depth >= max_depth:
+                    dirnames[:] = []
+                    continue
+                dirnames[:] = [d for d in dirnames if d not in skip_names]
+                found = _check_root(dirpath_p)
+                if found is not None:
+                    return found
+        except Exception:
+            return None
+        return None
+
+    def _resolve_candidate_root(path_str: str) -> Path | None:
+        if not path_str:
+            return None
+        try:
+            cand = Path(path_str).expanduser().resolve()
+        except Exception:
+            return None
+        return cand if cand.exists() else None
+
+    def _check_root(root: Path) -> Path | None:
+        try:
+            init_file = root / "src" / package_name / "__init__.py"
+            if init_file.exists():
+                return init_file.parent.parent
+            if root.name == "src":
+                init_file = root / package_name / "__init__.py"
+                if init_file.exists():
+                    return root
+            if root.name == package_name:
+                init_file = root / "__init__.py"
+                if init_file.exists():
+                    return root.parent
+        except Exception:
+            return None
+        return None
+
+    root_override = _resolve_candidate_root(PROJECT_ROOT_OVERRIDE) or _resolve_candidate_root(
+        os.environ.get("HULL_TACTICAL_PROJECT_ROOT", "")
+    )
+    if root_override is not None:
+        found = _check_root(root_override)
+        if found is not None:
+            return found
+
+    try:
+        this_file = Path(__file__).resolve()
+        for base in [this_file.parent] + list(this_file.parents):
+            found = _check_root(base)
+            if found is not None:
+                return found
+    except Exception:
+        pass
+
+    cwd = Path.cwd()
+    for base in [cwd] + list(cwd.parents):
+        found = _check_root(base)
+        if found is not None:
+            return found
+
+    try:
+        for child in cwd.iterdir():
+            if child.is_dir():
+                found = _check_root(child)
+                if found is not None:
+                    return found
+    except Exception:
+        pass
+
+    content_root = Path("/content")
+    if content_root.exists():
+        try:
+            for init_file in content_root.glob(f"*/src/{package_name}/__init__.py"):
+                return init_file.parent.parent
+        except Exception:
+            pass
+        found = _walk_find_root(
+            content_root,
+            max_depth=6,
+            max_dirs=5000,
+            skip_names={"drive", "__pycache__", ".ipynb_checkpoints", ".git", ".venv"},
+        )
+        if found is not None:
+            return found
+
+    drive_root = Path("/content/drive/MyDrive")
+    if drive_root.exists():
+        found = _walk_find_root(
+            drive_root,
+            max_depth=6,
+            max_dirs=8000,
+            skip_names={"__pycache__", ".ipynb_checkpoints", ".git", ".venv"},
+        )
+        if found is not None:
+            return found
+
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        dataset_roots = []
+        try:
+            dataset_roots = [p for p in kaggle_input.iterdir() if p.is_dir()]
+        except Exception:
+            dataset_roots = []
+
+        candidates: list[Path] = []
+        for ds_root in sorted(dataset_roots):
+            candidates.append(ds_root)
+            try:
+                children = [p for p in ds_root.iterdir() if p.is_dir()]
+            except Exception:
+                children = []
+            candidates.extend(children)
+            for child in children:
+                try:
+                    candidates.extend([p for p in child.iterdir() if p.is_dir()])
+                except Exception:
+                    continue
+
+        for base in candidates:
+            found = _check_root(base)
+            if found is not None:
+                return found
+    return None
+
+
+_src_dir = _find_src_dir_for_package("hull_tactical")
+if _src_dir is None and AUTO_CLONE_REPO and Path("/content").exists():
+    clone_dir = Path("/content") / REPO_CLONE_DIRNAME
+    if shutil.which("git") is None:
+        print("[import] git não encontrado; não foi possível clonar o repo automaticamente.")
+    else:
+        try:
+            if not clone_dir.exists():
+                subprocess.run(["git", "clone", "--depth", "1", REPO_GIT_URL, str(clone_dir)], check=True)
+            PROJECT_ROOT_OVERRIDE = str(clone_dir)
+            _src_dir = _find_src_dir_for_package("hull_tactical")
+        except Exception as exc:  # pragma: no cover
+            print(f"[import] Falha ao clonar repo automaticamente: {exc}")
+
+if _src_dir is not None and str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+    print(f"[import] Added to sys.path: {_src_dir}")
+
+try:
+    from hull_tactical import competition as ht_comp
+    from hull_tactical import io as ht_io
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise ModuleNotFoundError(
+        "Não foi possível importar `hull_tactical`.\n"
+        f"- cwd: {Path.cwd()}\n"
+        f"- src_dir encontrado: {_src_dir}\n"
+        "- Verifique se o diretório `src/hull_tactical/` está disponível no ambiente.\n"
+        "- No Colab: clone/extraia o repo ou suba o diretório `src/`.\n"
+        "- No Kaggle: adicione este repo como Dataset (ou copie `src/` para `/kaggle/working`).\n"
+        "- Alternativa: defina `PROJECT_ROOT_OVERRIDE` ou env `HULL_TACTICAL_PROJECT_ROOT`."
+    ) from exc
 
 
 # %% [markdown]
