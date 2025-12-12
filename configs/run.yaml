@@ -16,6 +16,10 @@ model:
 cv:
   n_splits: 4
   val_frac: 0.12
+  # Purge/gap em unidades de date_id entre treino e validação.
+  gap: 5
+  # Dá mais peso ao último fold (mais parecido com o futuro) no resumo do CV.
+  last_fold_weight: 2.0
   early_stopping_rounds: 20
 
 # Simple linear mapping baseline: alloc = clip(alpha + k * pred, [min,max])

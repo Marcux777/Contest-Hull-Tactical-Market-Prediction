@@ -97,6 +97,32 @@ def test_make_time_splits_non_empty():
         assert train_mask.sum() > 0 and val_mask.sum() > 0
 
 
+def test_make_time_splits_respects_gap():
+    hm.set_data_columns(is_scored_col="is_scored")
+    df = pd.DataFrame({"date_id": list(range(20)), "is_scored": [1] * 20, "forward_returns": np.linspace(0.0, 0.01, 20)})
+    gap = 3
+    splits = hm.make_time_splits(df, n_splits=4, val_frac=0.2, gap=gap)
+    assert splits
+    for train_mask, val_mask in splits:
+        train_dates = sorted(df.loc[train_mask, "date_id"].unique().tolist())
+        val_dates = sorted(df.loc[val_mask, "date_id"].unique().tolist())
+        assert train_dates and val_dates
+        assert max(train_dates) < min(val_dates)
+        # For consecutive date_id, the number of excluded dates between train and val is the gap.
+        assert (min(val_dates) - max(train_dates) - 1) >= gap
+        assert set(train_dates).isdisjoint(val_dates)
+
+
+def test_summarize_cv_metrics_last_fold_weight():
+    metrics = [
+        {"fold": 1, "sharpe": 0.0, "best_k": 1.0, "best_alpha": 1.0, "n_scored": 10},
+        {"fold": 2, "sharpe": 1.0, "best_k": 1.0, "best_alpha": 1.0, "n_scored": 10},
+    ]
+    summary = hm.summarize_cv_metrics(metrics, last_fold_weight=2.0)
+    assert np.isclose(summary["sharpe_mean"], 0.5, atol=1e-12)
+    assert np.isclose(summary["sharpe_mean_weighted"], 2.0 / 3.0, atol=1e-12)
+
+
 def test_prepare_train_test_frames_shapes():
     hm.set_data_columns(market_col="forward_returns", rf_col="risk_free_rate", is_scored_col="is_scored")
     train = pd.DataFrame(

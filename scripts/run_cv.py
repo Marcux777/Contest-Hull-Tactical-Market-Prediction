@@ -32,6 +32,8 @@ def main() -> int:
     parser.add_argument("--target-col", type=str, default=None)
     parser.add_argument("--n-splits", type=int, default=None)
     parser.add_argument("--val-frac", type=float, default=None)
+    parser.add_argument("--gap", type=int, default=None, help="Purge/gap in number of date_id steps between train and val.")
+    parser.add_argument("--last-fold-weight", type=float, default=None, help="Weight multiplier for the last fold in summary.")
     parser.add_argument("--num-boost-round", type=int, default=None)
     parser.add_argument("--weight-scored", type=float, default=None)
     parser.add_argument("--weight-unscored", type=float, default=None)
@@ -48,6 +50,8 @@ def main() -> int:
     target_col = args.target_col or run_cfg.get("target_col") or "target"
     n_splits = int(args.n_splits or cv_cfg.get("n_splits") or 4)
     val_frac = float(args.val_frac or cv_cfg.get("val_frac") or 0.12)
+    gap = int(args.gap if args.gap is not None else (cv_cfg.get("gap") or 0))
+    last_fold_weight = float(args.last_fold_weight if args.last_fold_weight is not None else (cv_cfg.get("last_fold_weight") or 1.0))
     num_boost_round = int(args.num_boost_round or model_cfg.get("num_boost_round") or cv_cfg.get("num_boost_round") or 200)
 
     weight_scored_cfg = run_cfg.get("weight_scored", cv_cfg.get("weight_scored"))
@@ -74,6 +78,8 @@ def main() -> int:
         cfg=cfg,
         n_splits=n_splits,
         val_frac=val_frac,
+        gap=gap,
+        last_fold_weight=last_fold_weight,
         num_boost_round=num_boost_round,
         weight_scored=weight_scored,
         weight_unscored=weight_unscored,
@@ -88,6 +94,8 @@ def main() -> int:
         "target_col": target_col,
         "n_splits": n_splits,
         "val_frac": val_frac,
+        "gap": gap,
+        "last_fold_weight": last_fold_weight,
         "num_boost_round": num_boost_round,
         "weight_scored": weight_scored,
         "weight_unscored": weight_unscored,
@@ -107,6 +115,8 @@ def main() -> int:
             "target_col": target_col,
             "n_splits": n_splits,
             "val_frac": val_frac,
+            "gap": gap,
+            "last_fold_weight": last_fold_weight,
             "num_boost_round": num_boost_round,
             "train_only_scored": int(train_only_scored),
             "weight_scored": weight_scored if weight_scored is not None else "",
@@ -116,6 +126,8 @@ def main() -> int:
             "best_alpha": out.get("best_alpha"),
             "sharpe_mean": summary.get("sharpe_mean", ""),
             "sharpe_std": summary.get("sharpe_std", ""),
+            "sharpe_mean_weighted": summary.get("sharpe_mean_weighted", ""),
+            "sharpe_std_weighted": summary.get("sharpe_std_weighted", ""),
         },
     )
     return 0

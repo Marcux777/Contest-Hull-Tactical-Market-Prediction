@@ -134,6 +134,8 @@ def choose_best_training_variant(
     target_col: str,
     variants: list[dict] | None = None,
     cfg: m.HullConfig | None = None,
+    gap: int = 0,
+    last_fold_weight: float = 1.0,
 ):
     """
     Roda CV para variantes full / weighted / scored_only e retorna a melhor pelo Sharpe médio.
@@ -154,13 +156,14 @@ def choose_best_training_variant(
             target_col,
             n_splits=4,
             val_frac=0.12,
+            gap=gap,
             weight_scored=1.0,
             weight_unscored=variant.get("weight_unscored"),
             train_only_scored=variant.get("train_only_scored", False),
             cfg=cfg_use,
             log_prefix=f"[{variant.get('name','variant')}]",
         )
-        summary = m.summarize_cv_metrics(metrics) or {}
+        summary = m.summarize_cv_metrics(metrics, last_fold_weight=last_fold_weight) or {}
         results.append(
             {
                 "name": variant.get("name"),
@@ -172,10 +175,11 @@ def choose_best_training_variant(
         )
     best = None
     for res in results:
-        sharpe_mean = res["summary"].get("sharpe_mean")
+        sharpe_mean = res["summary"].get("sharpe_mean_weighted") if last_fold_weight and last_fold_weight > 1 else res["summary"].get("sharpe_mean")
         if sharpe_mean is None or not (sharpe_mean == sharpe_mean):
             continue
-        if best is None or sharpe_mean > best["summary"].get("sharpe_mean", float("-inf")):
+        best_key = "sharpe_mean_weighted" if last_fold_weight and last_fold_weight > 1 else "sharpe_mean"
+        if best is None or sharpe_mean > best["summary"].get(best_key, float("-inf")):
             best = res
     return {"best": best, "all": results}
 
@@ -199,6 +203,7 @@ def run_time_cv(
     cfg: m.HullConfig | None = None,
     n_splits: int = 5,
     val_frac: float = 0.1,
+    gap: int = 0,
     params_override=None,
     num_boost_round: int | None = None,
     early_stopping_rounds: int | None = None,
@@ -231,6 +236,7 @@ def run_time_cv(
         target_col,
         n_splits=n_splits,
         val_frac=val_frac,
+        gap=gap,
         params_override=params_override,
         num_boost_round=num_boost_round or (cfg_use.best_params.get("num_boost_round", 200) if cfg_use.best_params else 200),
         early_stopping_rounds=early_stopping_rounds or 20,
@@ -253,6 +259,7 @@ def run_time_cv_fitref(
     cfg: m.HullConfig | None = None,
     n_splits: int = 4,
     val_frac: float = 0.12,
+    gap: int = 0,
     params_override=None,
     num_boost_round: int = 200,
     weight_scored: float | None = None,
@@ -273,6 +280,7 @@ def run_time_cv_fitref(
         target_col,
         n_splits=n_splits,
         val_frac=val_frac,
+        gap=gap,
         params_override=params_override,
         num_boost_round=num_boost_round,
         weight_scored=weight_scored,
@@ -294,6 +302,8 @@ def run_time_cv_fitref_oof(
     cfg: m.HullConfig | None = None,
     n_splits: int = 4,
     val_frac: float = 0.12,
+    gap: int = 0,
+    last_fold_weight: float = 1.0,
     params_override=None,
     num_boost_round: int = 200,
     weight_scored: float | None = None,
@@ -313,6 +323,8 @@ def run_time_cv_fitref_oof(
         target_col,
         n_splits=n_splits,
         val_frac=val_frac,
+        gap=gap,
+        last_fold_weight=last_fold_weight,
         params_override=params_override,
         num_boost_round=num_boost_round,
         weight_scored=weight_scored,
@@ -332,6 +344,7 @@ def run_ensemble_fitref_oof(
     cfg: m.HullConfig | None = None,
     n_splits: int = 4,
     val_frac: float = 0.12,
+    gap: int = 0,
     allocation_cfg: AllocationConfig | None = None,
     compute_weights: bool = True,
     ridge_alpha: float = 0.1,
@@ -365,6 +378,7 @@ def run_ensemble_fitref_oof(
             params_override=params_override,
             n_splits=n_splits,
             val_frac=val_frac,
+            gap=gap,
             num_boost_round=num_boost_round,
             seed=seed,
             weight_scored=weight_scored,

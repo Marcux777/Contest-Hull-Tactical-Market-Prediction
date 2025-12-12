@@ -82,6 +82,7 @@
   - [x] 4.2: Congelar policy `is_scored` em `configs/run.yaml` e aplicar em CV/treino final.
   - [x] 4.3: Calibração global OOF (k/alpha) + smoothing/vol-targeting via `AllocationConfig`.
   - [x] 4.3b: Evitar tuning de (k, alpha) no fold de validação (CV menos otimista).
+  - [x] 4.3c: Endurecer CV temporal com `gap` (purge) e peso no último fold.
   - [x] 4.4: Manter `02_submission` simples (bagging leve + allocation única).
 - [x] Kaggle-ready (Code Submission / ambiente restrito)
   - [x] Remover qualquer fluxo de credenciais Kaggle do notebook/repo (sem criação de `kaggle.json`).

@@ -184,13 +184,13 @@ def evaluate_baselines(train_df, feature_cols, target_col, cfg: HullConfig | Non
     }
 
 
-def constant_allocation_cv(df, n_splits=5, val_frac=0.1, cfg: HullConfig | None = None):
+def constant_allocation_cv(df, n_splits=5, val_frac=0.1, gap: int = 0, cfg: HullConfig | None = None):
     """Baseline: alocação constante (1.0) por fold temporal."""
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
-    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
+    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac, gap=gap)
     metrics = []
     for i, (mask_tr, mask_val) in enumerate(splits, 1):
         df_val = df.loc[mask_val].copy()
@@ -219,6 +219,7 @@ def time_cv_lightgbm_fitref(
     target_col,
     n_splits=4,
     val_frac=0.12,
+    gap: int = 0,
     params_override=None,
     num_boost_round=200,
     weight_scored: float | None = None,
@@ -243,7 +244,7 @@ def time_cv_lightgbm_fitref(
     alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     intent_cfg = cfg_resolved.intentional_cfg or INTENTIONAL_CFG
     fe_cfg = cfg_resolved.feature_cfg or FEATURE_CFG_DEFAULT
-    splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
+    splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac, gap=gap)
     metrics = []
     if not splits:
         return metrics
@@ -350,6 +351,7 @@ def run_cv_preds_fitref(
     params_override: dict | None = None,
     n_splits: int = 4,
     val_frac: float = 0.12,
+    gap: int = 0,
     num_boost_round: int = 200,
     seed: int | None = None,
     weight_scored: float | None = None,
@@ -376,7 +378,7 @@ def run_cv_preds_fitref(
     alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     intent_cfg = cfg_resolved.intentional_cfg or INTENTIONAL_CFG
     fe_cfg = cfg_resolved.feature_cfg or FEATURE_CFG_DEFAULT
-    splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
+    splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac, gap=gap)
     if not splits:
         return [], pd.DataFrame()
 
@@ -561,6 +563,8 @@ def time_cv_lightgbm_fitref_oof(
     *,
     n_splits: int = 4,
     val_frac: float = 0.12,
+    gap: int = 0,
+    last_fold_weight: float = 1.0,
     params_override: dict | None = None,
     num_boost_round: int = 200,
     weight_scored: float | None = None,
@@ -579,6 +583,7 @@ def time_cv_lightgbm_fitref_oof(
         params_override=params_override,
         n_splits=n_splits,
         val_frac=val_frac,
+        gap=gap,
         num_boost_round=num_boost_round,
         weight_scored=weight_scored,
         weight_unscored=weight_unscored,
@@ -602,7 +607,7 @@ def time_cv_lightgbm_fitref_oof(
         fold_col="fold",
     )
     metrics = scored["metrics"]
-    summary = summarize_cv_metrics(metrics) or {}
+    summary = summarize_cv_metrics(metrics, last_fold_weight=last_fold_weight) or {}
     out = {
         "metrics": metrics,
         "summary": summary,
@@ -617,23 +622,30 @@ def time_cv_lightgbm_fitref_oof(
     return out
 
 
-def make_time_splits(df, date_col="date_id", n_splits=5, val_frac=0.1, min_train_frac=0.5):
-    """Splits temporais por blocos contíguos de datas com janela de treino expandindo."""
+def make_time_splits(df, date_col="date_id", n_splits=5, val_frac=0.1, min_train_frac=0.5, gap: int = 0):
+    """Splits temporais por blocos contíguos de datas com janela de treino expandindo.
+
+    gap/purge: remove um buffer de `gap` datas entre o final do treino e o início da validação
+    (útil para features com lookback/rolling e para reduzir otimismo no CV).
+    """
     if date_col not in df.columns:
         return []
+    if gap < 0:
+        raise ValueError("gap must be >= 0")
     dates = np.array(sorted(df[date_col].unique()))
     n_dates = len(dates)
     if n_dates < 3:
         return []
     val_size = max(1, int(n_dates * val_frac))
     min_train = max(1, int(n_dates * min_train_frac))
+    gap = int(gap)
 
     splits = []
     if "is_scored" in df.columns:
         scored_per_date = df.groupby(date_col)["is_scored"].sum().reindex(dates, fill_value=0).to_numpy()
         total_scored = scored_per_date.sum()
         target_scored = total_scored / n_splits if total_scored > 0 else val_size
-        idx = min_train
+        idx = min_train + gap
         for _ in range(n_splits):
             if idx >= n_dates:
                 break
@@ -646,7 +658,8 @@ def make_time_splits(df, date_col="date_id", n_splits=5, val_frac=0.1, min_train
                 end = min(n_dates, idx + val_size)
             val_start = idx
             val_end = min(end, n_dates)
-            train_mask = df[date_col].isin(dates[:val_start])
+            train_end = max(0, val_start - gap)
+            train_mask = df[date_col].isin(dates[:train_end])
             val_mask = df[date_col].isin(dates[val_start:val_end])
             if train_mask.sum() == 0 or val_mask.sum() == 0:
                 idx = val_end
@@ -658,9 +671,10 @@ def make_time_splits(df, date_col="date_id", n_splits=5, val_frac=0.1, min_train
             idx = val_end
         return splits
     else:
+        start = min_train + gap
         for i in range(n_splits):
-            train_end = min_train + i * val_size
-            val_start = train_end
+            val_start = start + i * val_size
+            train_end = max(0, val_start - gap)
             val_end = val_start + val_size
             if val_end > n_dates:
                 break
@@ -853,6 +867,7 @@ def time_cv_lightgbm(
     num_boost_round=200,
     early_stopping_rounds=20,
     val_frac=0.1,
+    gap: int = 0,
     min_scored=20,
     weight_scored=None,
     weight_unscored=None,
@@ -877,7 +892,7 @@ def time_cv_lightgbm(
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
     alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
-    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
+    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac, gap=gap)
     metrics = []
     use_weights = weight_scored is not None or weight_unscored is not None
     weight_scored = 1.0 if weight_scored is None else weight_scored
@@ -1003,18 +1018,39 @@ def clipping_sensitivity(pred_returns, df_eval, k=None, alpha=1.0):
     return {"clipped": sharpe_clip, "unclipped": sharpe_no_clip}
 
 
-def summarize_cv_metrics(metrics):
-    """Resumo padronizado de CV com Sharpe e n_scored por fold."""
+def summarize_cv_metrics(metrics, *, last_fold_weight: float = 1.0):
+    """Resumo padronizado de CV com Sharpe e n_scored por fold.
+
+    `last_fold_weight` permite dar mais peso ao último fold (mais "future-like"):
+      weights = linspace(1, last_fold_weight, n_folds)
+    """
     if not metrics:
         return None
-    sharpe_vals = [m.get("sharpe") for m in metrics if m.get("sharpe") is not None]
+    metrics_sorted = sorted(metrics, key=lambda m: int(m.get("fold", 0) or 0))
+    sharpe_vals = [m.get("sharpe") for m in metrics_sorted if m.get("sharpe") is not None]
     k_vals = [m.get("best_k", ALLOC_K) for m in metrics if m.get("best_k") is not None]
     alpha_vals = [m.get("best_alpha", 1.0) for m in metrics if m.get("best_alpha") is not None]
     n_scored_vals = [m.get("n_scored", np.nan) for m in metrics]
     const_vals = [m.get("const_sharpe") for m in metrics if m.get("const_sharpe") is not None]
+    sharpe_last = float(metrics_sorted[-1].get("sharpe")) if metrics_sorted and metrics_sorted[-1].get("sharpe") is not None else np.nan
+
+    w_mean, w_std = np.nan, np.nan
+    try:
+        last_w = float(last_fold_weight)
+    except (TypeError, ValueError):
+        last_w = 1.0
+    if sharpe_vals and np.isfinite(last_w) and last_w > 1.0 and len(sharpe_vals) >= 2:
+        w = np.linspace(1.0, last_w, len(sharpe_vals))
+        w_mean = float(np.average(sharpe_vals, weights=w))
+        diffs = np.asarray(sharpe_vals, dtype=float) - w_mean
+        w_std = float(np.sqrt(np.average(diffs * diffs, weights=w)))
     return {
         "sharpe_mean": float(np.mean(sharpe_vals)) if sharpe_vals else np.nan,
         "sharpe_std": float(np.std(sharpe_vals)) if sharpe_vals else np.nan,
+        "sharpe_mean_weighted": w_mean,
+        "sharpe_std_weighted": w_std,
+        "last_fold_weight": float(last_w),
+        "sharpe_last": sharpe_last,
         "k_median": float(np.median(k_vals)) if k_vals else np.nan,
         "alpha_median": float(np.median(alpha_vals)) if alpha_vals else np.nan,
         "n_scored_min": int(np.nanmin(n_scored_vals)) if n_scored_vals else 0,
@@ -1088,6 +1124,7 @@ def run_cv_preds(
     params=None,
     n_splits=5,
     val_frac=0.1,
+    gap: int = 0,
     seed=None,
     weight_scored=None,
     weight_unscored=None,
@@ -1105,7 +1142,7 @@ def run_cv_preds(
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
     k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
     alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
-    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
+    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac, gap=gap)
     metrics, preds = [], []
     seed_use = SEED if seed is None else seed
     np.random.seed(seed_use)
