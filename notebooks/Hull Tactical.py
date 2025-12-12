@@ -303,6 +303,13 @@ if _src_dir is None and AUTO_CLONE_REPO and Path("/content").exists():
 if _src_dir is not None and str(_src_dir) not in sys.path:
     sys.path.insert(0, str(_src_dir))
     print(f"[import] Added to sys.path: {_src_dir}")
+    # Colab: por padrão, guarde dados dentro do repo clonado (mais fácil de achar).
+    if _running_in_colab() and PROJECT_ROOT_OVERRIDE:
+        try:
+            project_root = Path(PROJECT_ROOT_OVERRIDE).expanduser().resolve()
+            os.environ.setdefault("HT_DATA_DIR", str(project_root / "data"))
+        except Exception:
+            pass
 
 try:
     from hull_tactical import competition as ht_comp
@@ -339,13 +346,60 @@ import shutil
 import sys
 import subprocess
 from pathlib import Path
+from getpass import getpass
 
 CUSTOM_KAGGLE_JSON = ""  # ex.: "/content/kaggle.json" no runtime
 KAGGLE_USERNAME_MANUAL = ""  # alternativa: preencha user
 KAGGLE_KEY_MANUAL = ""       # alternativa: preencha key
+PROMPT_FOR_KAGGLE_CREDS = True  # Colab: pede user/key se não houver credenciais
+WRITE_DOTENV = True            # Colab: escreve `.env` após pedir credenciais (arquivo ignorado pelo git)
 
 def running_in_colab():
     return "google.colab" in sys.modules
+
+
+def load_env_file(path: Path) -> list[str]:
+    """Carrega variáveis simples do tipo KEY=VALUE (suporta prefixo `export`)."""
+    loaded: list[str] = []
+    try:
+        text = path.read_text()
+    except Exception:
+        return loaded
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value
+        loaded.append(key)
+    return loaded
+
+
+# Carrega `.env` se existir (útil no Colab)
+dotenv_candidates: list[Path] = []
+if PROJECT_ROOT_OVERRIDE:
+    dotenv_candidates.append(Path(PROJECT_ROOT_OVERRIDE) / ".env")
+dotenv_candidates.extend(
+    [
+        Path.cwd() / ".env",
+        Path("/content/.env"),
+        Path("/content/drive/MyDrive/.env"),
+    ]
+)
+for cand in dotenv_candidates:
+    if cand.exists():
+        loaded = load_env_file(cand)
+        if loaded:
+            print(f"Carreguei {len(loaded)} vars de {cand}")
+        break
 
 
 def find_kaggle_json(max_depth=5):
@@ -386,6 +440,24 @@ dest = kaggle_dir / "kaggle.json"
 
 # Procura kaggle.json
 source = find_kaggle_json()
+
+# Se estiver no Colab e ainda não há credenciais, pede interativamente
+if running_in_colab() and PROMPT_FOR_KAGGLE_CREDS:
+    has_env_creds = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
+    if not has_env_creds and source is None and not dest.exists():
+        try:
+            print("Credenciais Kaggle não encontradas. Informe abaixo (não será impresso).")
+            username_in = input("KAGGLE_USERNAME: ").strip()
+            key_in = getpass("KAGGLE_KEY: ").strip()
+            if username_in and key_in:
+                os.environ["KAGGLE_USERNAME"] = username_in
+                os.environ["KAGGLE_KEY"] = key_in
+                if WRITE_DOTENV:
+                    env_path = Path.cwd() / ".env"
+                    env_path.write_text(f"KAGGLE_USERNAME={username_in}\nKAGGLE_KEY={key_in}\n")
+                    print(f"Escrevi {env_path} (ignorando pelo git).")
+        except Exception as exc:  # pragma: no cover
+            print("Falha ao ler credenciais interativamente:", exc)
 
 # Cria via credenciais manuais/env se necessário
 if source is None and KAGGLE_USERNAME_MANUAL and KAGGLE_KEY_MANUAL:
@@ -527,7 +599,14 @@ KAGGLE_READY = ensure_kaggle_cli()
 
 # %%
 COMPETITION = ht_io.COMPETITION_SLUG
-paths = ht_io.ensure_local_data(ht_io.get_data_paths(), competition_slug=COMPETITION, download_if_missing=False)
+DOWNLOAD_IF_MISSING = running_in_colab()
+if DOWNLOAD_IF_MISSING:
+    print("Colab: vou baixar train/test automaticamente se estiverem faltando.")
+paths = ht_io.ensure_local_data(
+    ht_io.get_data_paths(),
+    competition_slug=COMPETITION,
+    download_if_missing=DOWNLOAD_IF_MISSING,
+)
 DATA_DIR = paths.data_dir
 SUBMISSION_DIR = paths.submissions_dir
 RAW_DIR = paths.raw_dir
