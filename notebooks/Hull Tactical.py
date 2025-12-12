@@ -137,8 +137,8 @@ def _running_in_colab() -> bool:
 
 
 AUTO_CLONE_REPO = _running_in_colab()  # Colab: clona o repo se `src/` não estiver disponível
-REPO_GIT_URL = "https://github.com/Marcux777/Hull-Tactical---Market-Prediction.git"
-REPO_CLONE_DIRNAME = "Hull-Tactical---Market-Prediction"
+REPO_GIT_URL = "https://github.com/Marcux777/Contest-Hull-Tactical-Market-Prediction.git"
+REPO_CLONE_DIRNAME = "Contest-Hull-Tactical-Market-Prediction"
 
 def _find_src_dir_for_package(package_name: str = "hull_tactical") -> Path | None:
     """Retorna o diretório `src/` que contém o pacote, se existir."""
