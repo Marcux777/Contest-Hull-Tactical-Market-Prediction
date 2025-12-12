@@ -327,271 +327,31 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
 
 # %% [markdown]
-# ## 1. Credenciais do Kaggle (rodar primeiro)
+# ## 1. Dados (Colab)
+# Este notebook **não** baixa dados via Kaggle API/CLI (evita credenciais no código).
+# Para rodar no Colab:
+# - Monte o Google Drive e copie a pasta `data/` (do seu ambiente local) para lá; OU
+# - Faça upload de `train.csv`/`test.csv` (ou do zip da competição) para uma pasta.
+# Depois, aponte `HT_DATA_DIR` (env var) para o diretório que contém `data/raw/train.csv` e `data/raw/test.csv`
+# (ou `train.csv`/`test.csv` diretamente).
 
 # %%
-# Credenciais do Kaggle:
-# - use `~/.kaggle/kaggle.json` (com `chmod 600`) OU
-# - exporte `KAGGLE_USERNAME` e `KAGGLE_KEY` no ambiente.
-# Boa prática: nunca deixe chaves hardcoded no notebook/repo.
-print("Credenciais: use ~/.kaggle/kaggle.json ou env vars (KAGGLE_USERNAME/KAGGLE_KEY).")
+RUNNING_IN_COLAB = _running_in_colab()
+MOUNT_DRIVE = RUNNING_IN_COLAB
+DATA_DIR_OVERRIDE = ""  # ex.: "/content/drive/MyDrive/hull-tactical/data"
 
-
-# %% [markdown]
-# ## 2. Configuração do Kaggle CLI
-
-# %%
-# Configuração do kaggle.json e CLI
-import shutil
-import sys
-import subprocess
-from pathlib import Path
-from getpass import getpass
-
-CUSTOM_KAGGLE_JSON = ""  # ex.: "/content/kaggle.json" no runtime
-KAGGLE_USERNAME_MANUAL = ""  # alternativa: preencha user
-KAGGLE_KEY_MANUAL = ""       # alternativa: preencha key
-PROMPT_FOR_KAGGLE_CREDS = True  # Colab: pede user/key se não houver credenciais
-WRITE_DOTENV = True            # Colab: escreve `.env` após pedir credenciais (arquivo ignorado pelo git)
-
-def running_in_colab():
-    return "google.colab" in sys.modules
-
-
-def load_env_file(path: Path) -> list[str]:
-    """Carrega variáveis simples do tipo KEY=VALUE (suporta prefixo `export`)."""
-    loaded: list[str] = []
+if RUNNING_IN_COLAB and MOUNT_DRIVE:
     try:
-        text = path.read_text()
-    except Exception:
-        return loaded
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :]
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip("'").strip('"')
-        if not key or key in os.environ:
-            continue
-        os.environ[key] = value
-        loaded.append(key)
-    return loaded
+        from google.colab import drive  # type: ignore
 
-
-# Carrega `.env` se existir (útil no Colab)
-dotenv_candidates: list[Path] = []
-if PROJECT_ROOT_OVERRIDE:
-    dotenv_candidates.append(Path(PROJECT_ROOT_OVERRIDE) / ".env")
-dotenv_candidates.extend(
-    [
-        Path.cwd() / ".env",
-        Path("/content/.env"),
-        Path("/content/drive/MyDrive/.env"),
-    ]
-)
-for cand in dotenv_candidates:
-    if cand.exists():
-        loaded = load_env_file(cand)
-        if loaded:
-            print(f"Carreguei {len(loaded)} vars de {cand}")
-        break
-
-
-def find_kaggle_json(max_depth=5):
-    candidates = []
-    if CUSTOM_KAGGLE_JSON:
-        candidates.append(Path(CUSTOM_KAGGLE_JSON).expanduser())
-    env_path = os.environ.get("KAGGLE_JSON")
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
-
-    current_path = Path.cwd()
-    for _ in range(max_depth):
-        candidates.append(current_path / "kaggle.json")
-        if current_path.parent == current_path:
-            break
-        current_path = current_path.parent
-
-    for root in (Path("/content"), Path.home()):
-        if root.exists():
-            try:
-                candidates.extend(root.rglob("kaggle.json"))
-            except Exception:
-                pass
-    for cand in candidates:
-        try:
-            if cand.exists():
-                return cand
-        except Exception:
-            continue
-    return None
-
-
-# CWD e destino
-print(f"CWD: {os.getcwd()}")
-kaggle_dir = Path.home() / ".kaggle"
-kaggle_dir.mkdir(exist_ok=True)
-dest = kaggle_dir / "kaggle.json"
-
-# Procura kaggle.json
-source = find_kaggle_json()
-
-# Se estiver no Colab e ainda não há credenciais, pede interativamente
-if running_in_colab() and PROMPT_FOR_KAGGLE_CREDS:
-    has_env_creds = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
-    if not has_env_creds and source is None and not dest.exists():
-        try:
-            print("Credenciais Kaggle não encontradas. Informe abaixo (não será impresso).")
-            username_in = input("KAGGLE_USERNAME: ").strip()
-            key_in = getpass("KAGGLE_KEY: ").strip()
-            if username_in and key_in:
-                os.environ["KAGGLE_USERNAME"] = username_in
-                os.environ["KAGGLE_KEY"] = key_in
-                if WRITE_DOTENV:
-                    env_path = Path.cwd() / ".env"
-                    env_path.write_text(f"KAGGLE_USERNAME={username_in}\nKAGGLE_KEY={key_in}\n")
-                    print(f"Escrevi {env_path} (ignorando pelo git).")
-        except Exception as exc:  # pragma: no cover
-            print("Falha ao ler credenciais interativamente:", exc)
-
-# Cria via credenciais manuais/env se necessário
-if source is None and KAGGLE_USERNAME_MANUAL and KAGGLE_KEY_MANUAL:
-    try:
-        data = {"username": KAGGLE_USERNAME_MANUAL, "key": KAGGLE_KEY_MANUAL}
-        dest.write_text(json.dumps(data))
-        dest.chmod(0o600)
-        source = dest
-        print("kaggle.json escrito a partir de credenciais manuais")
+        drive.mount("/content/drive")
     except Exception as exc:  # pragma: no cover
-        print("Falha ao gravar credenciais manuais:", exc)
+        print("Aviso: não consegui montar o Drive automaticamente:", exc)
 
-if source is None and os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
-    try:
-        data = {"username": os.environ["KAGGLE_USERNAME"], "key": os.environ["KAGGLE_KEY"]}
-        dest.write_text(json.dumps(data))
-        dest.chmod(0o600)
-        source = dest
-        print("kaggle.json escrito a partir de env vars")
-    except Exception as exc:  # pragma: no cover
-        print("Falha ao gravar credenciais de env:", exc)
+if DATA_DIR_OVERRIDE:
+    os.environ["HT_DATA_DIR"] = DATA_DIR_OVERRIDE
 
-# Se estiver no Colab com UI e upload habilitado
-if source and source != dest:
-    shutil.copy(source, dest)
-    dest.chmod(0o600)
-    print(f"Copiado {source} -> {dest}")
-elif dest.exists():
-    print(f"kaggle.json já está em {dest}")
-else:
-    print("ERRO: kaggle.json não encontrado. Defina CUSTOM_KAGGLE_JSON/KAGGLE_JSON ou KAGGLE_USERNAME/KAGGLE_KEY.")
-
-# Exporta credenciais para variáveis de ambiente, útil para a API Python
-creds = None
-if dest.exists():
-    try:
-        creds = json.loads(dest.read_text())
-        if creds.get("username") and creds.get("key"):
-            os.environ.setdefault("KAGGLE_USERNAME", creds["username"])
-            os.environ.setdefault("KAGGLE_KEY", creds["key"])
-    except Exception as exc:
-        print("Aviso: não consegui ler kaggle.json:", exc)
-
-# Instala o pacote kaggle se não estiver presente
-if shutil.which("kaggle") is None:
-    print("Instalando pacote kaggle...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "kaggle"], check=True)
-    print("Pacote kaggle instalado.")
-
-# Autentica via Kaggle API se o arquivo existir
-KAGGLE_API_READY = False
-if dest.exists():
-    try:
-        from kaggle.api.kaggle_api_extended import KaggleApi
-
-        api = KaggleApi()
-        api.authenticate()
-        KAGGLE_API_READY = True
-        print("Kaggle API autenticada com sucesso.")
-    except Exception as exc:  # pragma: no cover
-        print("Falha ao autenticar Kaggle API:", exc)
-        print("Verifique se kaggle.json tem username/key válidos e permissão 600.")
-else:
-    print("Pulando autenticação: kaggle.json não encontrado.")
-
-
-def candidate_kaggle_jsons():
-    paths = []
-    if "find_kaggle_json" in globals():
-        src = find_kaggle_json()
-        if src:
-            paths.append(src)
-    if "CUSTOM_KAGGLE_JSON" in globals() and CUSTOM_KAGGLE_JSON:
-        paths.append(pathlib.Path(CUSTOM_KAGGLE_JSON).expanduser())
-    env_path = os.environ.get("KAGGLE_JSON")
-    if env_path:
-        paths.append(pathlib.Path(env_path).expanduser())
-    paths.extend(
-        [
-            pathlib.Path("/content/kaggle.json"),
-            pathlib.Path.cwd() / "kaggle.json",
-            pathlib.Path.cwd().parent / "kaggle.json",
-            pathlib.Path.home() / "kaggle.json",
-        ]
-    )
-    colab_root = pathlib.Path("/content")
-    if colab_root.exists():
-        try:
-            paths.extend(colab_root.rglob("kaggle.json"))
-        except Exception:
-            pass
-    uniq = []
-    seen = set()
-    for p in paths:
-        try:
-            resolved = p.resolve()
-        except FileNotFoundError:
-            resolved = p
-        if resolved not in seen:
-            uniq.append(resolved)
-            seen.add(resolved)
-    return uniq
-
-
-def ensure_kaggle_cli():
-    kaggle_dir = pathlib.Path("~/.kaggle").expanduser()
-    kaggle_dir.mkdir(exist_ok=True)
-    dest = kaggle_dir / "kaggle.json"
-
-    for src in candidate_kaggle_jsons():
-        if src.exists() and src != dest and not dest.exists():
-            shutil.copy(src, dest)
-            os.chmod(dest, 0o600)
-            print(f"kaggle.json copiado de {src}")
-            break
-
-    if not dest.exists():
-        print("kaggle.json não encontrado; preencha as credenciais.")
-
-    if dest.exists() and shutil.which("kaggle") is None:
-        if running_in_colab():
-            try:
-                subprocess.run(["pip", "install", "-q", "kaggle"], check=True)
-            except subprocess.CalledProcessError as exc:  # pragma: no cover
-                print("Falha ao instalar kaggle via pip:", exc)
-        else:
-            print("Instale o pacote kaggle localmente: pip install kaggle")
-
-    ready = dest.exists() and shutil.which("kaggle") is not None
-    print("Kaggle CLI pronto?", ready)
-    return ready
-
-
-KAGGLE_READY = ensure_kaggle_cli()
+print("HT_DATA_DIR:", os.environ.get("HT_DATA_DIR"))
 
 
 # %% [markdown]
@@ -599,14 +359,19 @@ KAGGLE_READY = ensure_kaggle_cli()
 
 # %%
 COMPETITION = ht_io.COMPETITION_SLUG
-DOWNLOAD_IF_MISSING = running_in_colab()
-if DOWNLOAD_IF_MISSING:
-    print("Colab: vou baixar train/test automaticamente se estiverem faltando.")
-paths = ht_io.ensure_local_data(
-    ht_io.get_data_paths(),
-    competition_slug=COMPETITION,
-    download_if_missing=DOWNLOAD_IF_MISSING,
-)
+try:
+    paths = ht_io.ensure_local_data(
+        ht_io.get_data_paths(),
+        competition_slug=COMPETITION,
+        download_if_missing=False,
+    )
+except FileNotFoundError as exc:
+    msg = (
+        f"{exc}\n\n"
+        "No Colab: coloque os arquivos em uma pasta do Drive e defina `DATA_DIR_OVERRIDE`/`HT_DATA_DIR`\n"
+        "para essa pasta (ela deve conter `raw/train.csv` e `raw/test.csv`, ou `train.csv`/`test.csv`)."
+    )
+    raise FileNotFoundError(msg) from exc
 DATA_DIR = paths.data_dir
 SUBMISSION_DIR = paths.submissions_dir
 RAW_DIR = paths.raw_dir

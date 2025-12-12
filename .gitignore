@@ -2,9 +2,16 @@ data/
 models/
 .venv/
 .env
+.env.*
+!.env.example
 .envrc
 .direnv/
+.kaggle/
 kaggle.json
+*.key
+*.pem
+*.p12
+*.pfx
 *.ipynb_checkpoints
 __pycache__/
 *.pyc

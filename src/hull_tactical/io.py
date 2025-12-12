@@ -133,7 +133,8 @@ def ensure_local_data(
     if not (paths.train_path.exists() and paths.test_path.exists()):
         raise FileNotFoundError(
             f"train.csv/test.csv não encontrados em {paths.data_dir.resolve()}. "
-            f"Baixe via Kaggle CLI (download_if_missing=True) ou coloque os arquivos manualmente."
+            "Coloque os arquivos manualmente (ex.: ajuste `HT_DATA_DIR`) "
+            "ou baixe via Kaggle CLI (download_if_missing=True)."
         )
     return paths
 
