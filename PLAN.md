@@ -1,4 +1,9 @@
 # Plano – próximos passos
+- [x] STOP-SHIP: segurança de credenciais
+  - [x] Remover fluxo de credenciais Kaggle do notebook (sem hard-code).
+  - [x] Adicionar `.env.example` e endurecer `.gitignore` para arquivos de segredo.
+  - [x] Adicionar scan simples de segredos (`scripts/scan_secrets.py`).
+  - [x] Reescrever histórico git para remover credenciais antigas do notebook.
 - [x] Plano rápido – corrigir warnings de fragmentação
   - [x] Identificar onde `df_proc[name] = series` é chamado em loop no notebook e mapear colunas criadas.
   - [x] Refatorar o pré-processamento para criar colunas derivadas em bloco com `pd.concat`/`assign`, evitando inserts repetidos.
