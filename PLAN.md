@@ -3,6 +3,7 @@
   - [x] Remover fluxo de credenciais Kaggle do notebook (sem hard-code).
   - [x] Adicionar `.env.example` e endurecer `.gitignore` para arquivos de segredo.
   - [x] Adicionar scan simples de segredos (`scripts/scan_secrets.py`).
+  - [x] Bloquear `kaggle.json` dentro do repo (mesmo ignorado) e detectar via scan local.
   - [x] Reescrever histórico git para remover credenciais antigas do notebook.
 - [x] Plano rápido – corrigir warnings de fragmentação
   - [x] Identificar onde `df_proc[name] = series` é chamado em loop no notebook e mapear colunas criadas.
@@ -80,6 +81,7 @@
   - [x] 4.1: Alinhar treino final à CV (mesmo pipeline de features + num_boost_round + policy).
   - [x] 4.2: Congelar policy `is_scored` em `configs/run.yaml` e aplicar em CV/treino final.
   - [x] 4.3: Calibração global OOF (k/alpha) + smoothing/vol-targeting via `AllocationConfig`.
+  - [x] 4.3b: Evitar tuning de (k, alpha) no fold de validação (CV menos otimista).
   - [x] 4.4: Manter `02_submission` simples (bagging leve + allocation única).
 - [x] Kaggle-ready (Code Submission / ambiente restrito)
   - [x] Remover qualquer fluxo de credenciais Kaggle do notebook/repo (sem criação de `kaggle.json`).

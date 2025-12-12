@@ -206,6 +206,10 @@ def run_time_cv(
     weight_unscored: float | None = None,
     train_only_scored: bool = False,
     log_prefix: str | None = None,
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    allocation_cfg: AllocationConfig | None = None,
+    tune_allocation_on_val: bool = False,
 ):
     """
     Wrapper para rodar CV temporal com o feature set escolhido usando o pipeline de features oficial.
@@ -234,6 +238,10 @@ def run_time_cv(
         weight_unscored=weight_unscored,
         train_only_scored=train_only_scored,
         log_prefix=log_prefix or "",
+        alloc_k=alloc_k,
+        alloc_alpha=alloc_alpha,
+        allocation_cfg=allocation_cfg,
+        tune_allocation_on_val=tune_allocation_on_val,
         cfg=cfg_use,
     )
 
@@ -247,6 +255,13 @@ def run_time_cv_fitref(
     val_frac: float = 0.12,
     params_override=None,
     num_boost_round: int = 200,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    train_only_scored: bool = False,
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    allocation_cfg: AllocationConfig | None = None,
+    tune_allocation_on_val: bool = False,
 ):
     """
     Wrapper para CV temporal recalculando features por fold (fit_ref), mantendo as configs do pacote.
@@ -260,6 +275,13 @@ def run_time_cv_fitref(
         val_frac=val_frac,
         params_override=params_override,
         num_boost_round=num_boost_round,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
+        train_only_scored=train_only_scored,
+        alloc_k=alloc_k,
+        alloc_alpha=alloc_alpha,
+        tune_allocation_on_val=tune_allocation_on_val,
+        allocation_cfg=allocation_cfg,
         cfg=cfg_use,
     )
 

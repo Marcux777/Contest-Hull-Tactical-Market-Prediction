@@ -75,6 +75,7 @@ class HullConfig:
     feature_cfg: dict | None = None
     best_params: dict | None = None
     alloc_k: float = ALLOC_K
+    alloc_alpha: float = 1.0
     min_investment: float = MIN_INVESTMENT
     max_investment: float = MAX_INVESTMENT
 
@@ -89,6 +90,7 @@ def default_config(config_dir: Path | str | None = None) -> HullConfig:
     intentional_cfg = dict(INTENTIONAL_CFG)
     best_params = dict(BEST_PARAMS)
     alloc_k = ALLOC_K
+    alloc_alpha = 1.0
     min_investment = MIN_INVESTMENT
     max_investment = MAX_INVESTMENT
 
@@ -102,6 +104,8 @@ def default_config(config_dir: Path | str | None = None) -> HullConfig:
     if isinstance(loaded.run_cfg, dict):
         if "alloc_k" in loaded.run_cfg:
             alloc_k = float(loaded.run_cfg["alloc_k"])
+        if "alloc_alpha" in loaded.run_cfg:
+            alloc_alpha = float(loaded.run_cfg["alloc_alpha"])
         if "min_investment" in loaded.run_cfg:
             min_investment = float(loaded.run_cfg["min_investment"])
         if "max_investment" in loaded.run_cfg:
@@ -115,6 +119,7 @@ def default_config(config_dir: Path | str | None = None) -> HullConfig:
         feature_cfg=feature_cfg,
         best_params=best_params,
         alloc_k=alloc_k,
+        alloc_alpha=alloc_alpha,
         min_investment=min_investment,
         max_investment=max_investment,
     )
@@ -219,14 +224,23 @@ def time_cv_lightgbm_fitref(
     weight_scored: float | None = None,
     weight_unscored: float | None = None,
     train_only_scored: bool = False,
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    tune_allocation_on_val: bool = False,
     allocation_cfg: AllocationConfig | None = None,
     cfg: HullConfig | None = None,
 ):
-    """CV temporal recalculando features por fold (winsor/clipping/z-score usando apenas o treino)."""
+    """CV temporal recalculando features por fold (winsor/clipping/z-score usando apenas o treino).
+
+    Importante: por padrão, não otimiza (k, alpha) no fold de validação; usa valores fixos
+    (`alloc_k/alloc_alpha`) para evitar CV otimista.
+    """
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
+    alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     intent_cfg = cfg_resolved.intentional_cfg or INTENTIONAL_CFG
     fe_cfg = cfg_resolved.feature_cfg or FEATURE_CFG_DEFAULT
     splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
@@ -283,18 +297,33 @@ def time_cv_lightgbm_fitref(
         )
         model.fit(X_tr, y_tr, sample_weight=sample_weight)
         pred_val = model.predict(X_val)
-        best_k, best_alpha, _ = optimize_allocation_scale(
-            pred_val,
-            df_val_fe,
-            market_col=market_col,
-            rf_col=rf_col,
-            is_scored_col=is_scored_col,
-            allocation_cfg=allocation_cfg,
-        )
-        if allocation_cfg is None:
-            alloc_val = map_return_to_alloc(pred_val, k=best_k, intercept=best_alpha)
+        if tune_allocation_on_val:
+            best_k, best_alpha, _ = optimize_allocation_scale(
+                pred_val,
+                df_val_fe,
+                market_col=market_col,
+                rf_col=rf_col,
+                is_scored_col=is_scored_col,
+                allocation_cfg=allocation_cfg,
+            )
+            k_eval = float(best_k)
+            alpha_eval = float(best_alpha)
+            alloc_mode = "val_optimize"
         else:
-            alloc_val = apply_allocation_strategy(pred_val, df_val_fe, k=float(best_k), alpha=float(best_alpha), cfg=allocation_cfg)
+            k_eval = k_base
+            alpha_eval = alpha_base
+            alloc_mode = "fixed"
+
+        if allocation_cfg is None:
+            alloc_val = map_return_to_alloc(pred_val, k=k_eval, intercept=alpha_eval)
+        else:
+            alloc_val = apply_allocation_strategy(
+                pred_val,
+                df_val_fe,
+                k=float(k_eval),
+                alpha=float(alpha_eval),
+                cfg=allocation_cfg,
+            )
         sharpe_val, details = adjusted_sharpe_score(
             df_val_fe, alloc_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
@@ -302,10 +331,11 @@ def time_cv_lightgbm_fitref(
             {
                 "fold": i,
                 "sharpe": sharpe_val,
-                "best_k": best_k,
-                "best_alpha": best_alpha,
+                "best_k": float(k_eval),
+                "best_alpha": float(alpha_eval),
                 "n_scored": int(df_val_fe[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val_fe.columns else len(df_val_fe),
                 "strategy_vol": details.get("strategy_vol"),
+                "alloc_mode": alloc_mode,
             }
         )
     return metrics
@@ -325,6 +355,9 @@ def run_cv_preds_fitref(
     weight_scored: float | None = None,
     weight_unscored: float | None = None,
     train_only_scored: bool = False,
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    tune_allocation_on_val: bool = False,
     allocation_cfg: AllocationConfig | None = None,
     keep_context_cols: tuple[str, ...] | None = ("date_id", "regime_std_20", "regime_high_vol"),
     cfg: HullConfig | None = None,
@@ -332,13 +365,15 @@ def run_cv_preds_fitref(
     """Gera predições OOF com features recalculadas por fold (fit_ref).
 
     Retorna:
-    - metrics: métricas por fold (com calibração local de k/alpha no próprio fold).
+    - metrics: métricas por fold (por padrão com k/alpha fixos; para "upper bound" otimista use tune_allocation_on_val=True).
     - pred_df: dataframe OOF com colunas (pred_return/alloc/target/market/rf/is_scored/fold/...).
     """
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
+    alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     intent_cfg = cfg_resolved.intentional_cfg or INTENTIONAL_CFG
     fe_cfg = cfg_resolved.feature_cfg or FEATURE_CFG_DEFAULT
     splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
@@ -444,18 +479,33 @@ def run_cv_preds_fitref(
         else:
             continue
 
-        best_k, best_alpha, _ = optimize_allocation_scale(
-            pred,
-            df_val_fe,
-            market_col=market_col,
-            rf_col=rf_col,
-            is_scored_col=is_scored_col,
-            allocation_cfg=allocation_cfg,
-        )
-        if allocation_cfg is None:
-            alloc = map_return_to_alloc(pred, k=best_k, intercept=best_alpha)
+        if tune_allocation_on_val:
+            best_k, best_alpha, _ = optimize_allocation_scale(
+                pred,
+                df_val_fe,
+                market_col=market_col,
+                rf_col=rf_col,
+                is_scored_col=is_scored_col,
+                allocation_cfg=allocation_cfg,
+            )
+            k_eval = float(best_k)
+            alpha_eval = float(best_alpha)
+            alloc_mode = "val_optimize"
         else:
-            alloc = apply_allocation_strategy(pred, df_val_fe, k=float(best_k), alpha=float(best_alpha), cfg=allocation_cfg)
+            k_eval = k_base
+            alpha_eval = alpha_base
+            alloc_mode = "fixed"
+
+        if allocation_cfg is None:
+            alloc = map_return_to_alloc(pred, k=k_eval, intercept=alpha_eval)
+        else:
+            alloc = apply_allocation_strategy(
+                pred,
+                df_val_fe,
+                k=float(k_eval),
+                alpha=float(alpha_eval),
+                cfg=allocation_cfg,
+            )
 
         sharpe_adj, details = adjusted_sharpe_score(
             df_val_fe,
@@ -470,12 +520,13 @@ def run_cv_preds_fitref(
                 {
                     "fold": i,
                     "sharpe": float(sharpe_adj),
-                    "best_alpha": float(best_alpha),
-                    "best_k": float(best_k),
+                    "best_alpha": float(alpha_eval),
+                    "best_k": float(k_eval),
                     "n_val": int(len(df_val_fe)),
                     "n_scored": int(n_scored),
                     "strategy_vol": details.get("strategy_vol"),
                     "seed": int(seed_use),
+                    "alloc_mode": alloc_mode,
                 }
             )
 
@@ -532,7 +583,7 @@ def time_cv_lightgbm_fitref_oof(
         weight_scored=weight_scored,
         weight_unscored=weight_unscored,
         train_only_scored=train_only_scored,
-        allocation_cfg=None,  # OOF global calibra depois; evita "melhor k por fold"
+        allocation_cfg=None,  # allocation/calibração é aplicada depois (no OOF inteiro)
         cfg=cfg,
     )
 
@@ -807,17 +858,25 @@ def time_cv_lightgbm(
     weight_unscored=None,
     train_only_scored=False,
     log_prefix="",
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    allocation_cfg: AllocationConfig | None = None,
+    tune_allocation_on_val: bool = False,
     cfg: HullConfig | None = None,
 ):
     """
     Cross-val temporal com LightGBM.
     - weight_scored/weight_unscored: permitem ponderar linhas is_scored; se ambos None, treino sem pesos.
     - train_only_scored=True filtra o treino para usar apenas linhas is_scored==1 (útil para comparar variantes).
+    - Por padrão, `alloc_k/alloc_alpha` ficam fixos durante o CV (evita overfit no fold de validação).
+      Se quiser medir um "upper bound" otimista, use tune_allocation_on_val=True.
     """
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
+    alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
     metrics = []
     use_weights = weight_scored is not None or weight_unscored is not None
@@ -859,10 +918,33 @@ def time_cv_lightgbm(
         )
         best_iter = model.best_iteration or model.current_iteration()
         pred_val = model.predict(X_val, num_iteration=best_iter)
-        best_k, best_alpha, _ = optimize_allocation_scale(
-            pred_val, df_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
-        )
-        alloc_val = map_return_to_alloc(pred_val, k=best_k, intercept=best_alpha)
+        if tune_allocation_on_val:
+            best_k, best_alpha, _ = optimize_allocation_scale(
+                pred_val,
+                df_val,
+                market_col=market_col,
+                rf_col=rf_col,
+                is_scored_col=is_scored_col,
+                allocation_cfg=allocation_cfg,
+            )
+            k_eval = float(best_k)
+            alpha_eval = float(best_alpha)
+            alloc_mode = "val_optimize"
+        else:
+            k_eval = k_base
+            alpha_eval = alpha_base
+            alloc_mode = "fixed"
+
+        if allocation_cfg is None:
+            alloc_val = map_return_to_alloc(pred_val, k=k_eval, intercept=alpha_eval)
+        else:
+            alloc_val = apply_allocation_strategy(
+                pred_val,
+                df_val,
+                k=float(k_eval),
+                alpha=float(alpha_eval),
+                cfg=allocation_cfg,
+            )
         sharpe_adj, details = adjusted_sharpe_score(
             df_val,
             pd.Series(alloc_val, index=df_val.index),
@@ -890,13 +972,14 @@ def time_cv_lightgbm(
             {
                 "fold": i,
                 "sharpe": sharpe_adj,
-                "best_k": best_k,
-                "best_alpha": best_alpha,
+                "best_k": float(k_eval),
+                "best_alpha": float(alpha_eval),
                 "best_iter": best_iter,
                 "n_val": n_val,
                 "n_scored": n_scored,
                 "strategy_vol": details.get("strategy_vol"),
                 "const_sharpe": const_sharpe,
+                "alloc_mode": alloc_mode,
             }
         )
     return metrics
@@ -1009,6 +1092,10 @@ def run_cv_preds(
     weight_scored=None,
     weight_unscored=None,
     train_only_scored=False,
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    allocation_cfg: AllocationConfig | None = None,
+    tune_allocation_on_val: bool = False,
     cfg: HullConfig | None = None,
     keep_context_cols: tuple[str, ...] | None = ("date_id", "regime_std_20", "regime_high_vol"),
 ):
@@ -1016,6 +1103,8 @@ def run_cv_preds(
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
+    alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac)
     metrics, preds = [], []
     seed_use = SEED if seed is None else seed
@@ -1100,10 +1189,33 @@ def run_cv_preds(
         else:
             continue
 
-        best_k, best_alpha, _ = optimize_allocation_scale(
-            pred, df_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
-        )
-        alloc = map_return_to_alloc(pred, k=best_k, intercept=best_alpha)
+        if tune_allocation_on_val:
+            best_k, best_alpha, _ = optimize_allocation_scale(
+                pred,
+                df_val,
+                market_col=market_col,
+                rf_col=rf_col,
+                is_scored_col=is_scored_col,
+                allocation_cfg=allocation_cfg,
+            )
+            k_eval = float(best_k)
+            alpha_eval = float(best_alpha)
+            alloc_mode = "val_optimize"
+        else:
+            k_eval = k_base
+            alpha_eval = alpha_base
+            alloc_mode = "fixed"
+
+        if allocation_cfg is None:
+            alloc = map_return_to_alloc(pred, k=k_eval, intercept=alpha_eval)
+        else:
+            alloc = apply_allocation_strategy(
+                pred,
+                df_val,
+                k=float(k_eval),
+                alpha=float(alpha_eval),
+                cfg=allocation_cfg,
+            )
         sharpe_adj, details = adjusted_sharpe_score(
             df_val,
             pd.Series(alloc, index=df_val.index),
@@ -1120,12 +1232,13 @@ def run_cv_preds(
             {
                 "fold": i,
                 "sharpe": sharpe_adj,
-                "best_alpha": best_alpha,
-                "best_k": best_k,
+                "best_alpha": float(alpha_eval),
+                "best_k": float(k_eval),
                 "n_val": len(X_val),
                 "n_scored": n_scored,
                 "strategy_vol": details.get("strategy_vol"),
                 "seed": seed_use,
+                "alloc_mode": alloc_mode,
             }
         )
         preds.append(
@@ -1214,12 +1327,18 @@ def expanding_holdout_eval(
     label="holdout",
     use_weights=False,
     weight_unscored=0.2,
+    alloc_k: float | None = None,
+    alloc_alpha: float | None = None,
+    allocation_cfg: AllocationConfig | None = None,
+    tune_allocation_on_holdout: bool = False,
     cfg: HullConfig | None = None,
 ):
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
     rf_col = cfg_resolved.rf_col or RF_COL
     is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    k_base = float(cfg_resolved.alloc_k) if alloc_k is None else float(alloc_k)
+    alpha_base = float(cfg_resolved.alloc_alpha) if alloc_alpha is None else float(alloc_alpha)
     if "date_id" in df.columns:
         df_sorted = df.sort_values("date_id")
     else:
@@ -1243,8 +1362,33 @@ def expanding_holdout_eval(
     params = {"objective": "regression", "metric": "rmse", **(cfg_resolved.best_params or BEST_PARAMS)}
     model = lgb.train(params, lgb.Dataset(X_tr, label=y_tr, weight=train_weight), num_boost_round=200)
     pred_ho = model.predict(X_ho)
-    best_k, best_alpha, _ = optimize_allocation_scale(pred_ho, holdout_part, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col)
-    alloc_ho = map_return_to_alloc(pred_ho, k=best_k, intercept=best_alpha)
+    if tune_allocation_on_holdout:
+        best_k, best_alpha, _ = optimize_allocation_scale(
+            pred_ho,
+            holdout_part,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
+            allocation_cfg=allocation_cfg,
+        )
+        k_eval = float(best_k)
+        alpha_eval = float(best_alpha)
+        alloc_mode = "holdout_optimize"
+    else:
+        k_eval = k_base
+        alpha_eval = alpha_base
+        alloc_mode = "fixed"
+
+    if allocation_cfg is None:
+        alloc_ho = map_return_to_alloc(pred_ho, k=k_eval, intercept=alpha_eval)
+    else:
+        alloc_ho = apply_allocation_strategy(
+            pred_ho,
+            holdout_part,
+            k=float(k_eval),
+            alpha=float(alpha_eval),
+            cfg=allocation_cfg,
+        )
     sharpe_ho, details = adjusted_sharpe_score(
         holdout_part, alloc_ho, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
     )
@@ -1253,8 +1397,9 @@ def expanding_holdout_eval(
         "holdout_frac": holdout_frac,
         "train_only_scored": train_only_scored,
         "sharpe_holdout": sharpe_ho,
-        "k_best": best_k,
-        "alpha_best": best_alpha,
+        "k_best": float(k_eval),
+        "alpha_best": float(alpha_eval),
+        "alloc_mode": alloc_mode,
         "n_train": len(train_part),
         "n_holdout": len(holdout_part),
         "n_scored_holdout": int(holdout_part[is_scored_col].sum()) if is_scored_col and is_scored_col in holdout_part.columns else len(holdout_part),

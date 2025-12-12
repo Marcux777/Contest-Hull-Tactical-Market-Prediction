@@ -92,6 +92,42 @@ def scan_working_tree() -> list[Finding]:
     return findings
 
 
+def scan_local_sensitive_paths() -> list[Finding]:
+    """Scans common local secret files even if they are untracked/ignored.
+
+    This prevents accidental leakage when zipping/sharing the repo folder.
+    """
+    findings: list[Finding] = []
+    # Kaggle token file should live in ~/.kaggle/kaggle.json, never inside the repo.
+    kaggle_token_paths = [Path("kaggle.json"), Path(".kaggle") / "kaggle.json"]
+    for p in kaggle_token_paths:
+        try:
+            if not p.exists() or p.is_dir():
+                continue
+            findings.append(Finding(location=str(p), kind="Kaggle token file present in repo working tree"))
+            if p.stat().st_size > MAX_SCAN_BYTES:
+                continue
+            content = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        findings.extend(scan_text(content, location=str(p)))
+
+    # Optional local env files: only flag if they contain Kaggle patterns.
+    env_paths = [Path(".env"), Path(".envrc")]
+    for p in env_paths:
+        try:
+            if not p.exists() or p.is_dir():
+                continue
+            if p.stat().st_size > MAX_SCAN_BYTES:
+                continue
+            content = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        findings.extend(scan_text(content, location=str(p)))
+
+    return findings
+
+
 def _should_scan_history_path(path: str) -> bool:
     p = Path(path)
     if p.name in {"kaggle.json", ".env", ".envrc"}:
@@ -133,6 +169,7 @@ def main() -> int:
     args = parser.parse_args()
 
     findings = scan_history() if args.history else scan_working_tree()
+    findings.extend(scan_local_sensitive_paths())
     if not findings:
         print("OK: no obvious secrets found.")
         return 0
