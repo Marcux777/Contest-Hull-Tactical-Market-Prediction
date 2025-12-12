@@ -75,6 +75,7 @@
   - [x] 3.1: Separar notebooks `01_research` e `02_submission` (jupytext).
   - [x] 3.2: Centralizar configs em `configs/` (`features.yaml`, `lgb.yaml`, `run.yaml`) + loader em `src/hull_tactical/config.py`.
   - [x] 3.3: Testes mínimos (`tests/test_metric.py`, `tests/test_features.py`) cobrindo métrica e guardrails de features/fit_ref.
+  - [x] 3.4: Remover “gordura” (cross-sectional por `date_id`) e manter só FE temporal (lags/rolling/ratios).
   - [x] Ajustar `scripts/` para ler YAML (CV/treino/submissão) e reduzir mudanças manuais no notebook.
   - [x] Atualizar `AGENTS.md`/docs para o novo fluxo e rodar smoke-check (`pytest`, `py_compile`).
 - [x] Pontuação — alinhar CV/treino/alloc

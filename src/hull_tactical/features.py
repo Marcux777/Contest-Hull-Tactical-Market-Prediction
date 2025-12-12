@@ -6,7 +6,7 @@ Feature sets expostos (chaves usuais do dict retornado por build_feature_sets/ma
 - A_baseline: colunas numéricas originais (exceto ids/target/forward_returns/rf) sem agregações.
 - B_families: baseline + agregações por família (mean/std/median).
 - C_regimes: B + regimes (std/mean e flags de vol).
-- D_intentional: C + features intencionais (lags, clip, tanh, z).
+- D_intentional: C + lags e features intencionais (clip/tanh/z) + razões/diferenças/combos simples (time-series only).
 - E_fe_oriented: D + restante das features engenheiradas (quando use_extended_set=True).
 - F_v2_intentional: E + quaisquer colunas adicionais não cobertas em E (fallback).
 """
@@ -31,6 +31,12 @@ FEATURE_CFG_DEFAULT = {
     "add_family_medians": True,
     "add_ratios": True,  # mean/std and mean-median per family
     "add_diffs": True,  # mean-std per family
+    # Cross-sectional (per date_id) norms degenerate for this competition (1 row/day),
+    # so they are opt-in.
+    "enable_cross_sectional_norms": False,
+    # Surprise features can explode feature count; keep opt-in and scoped.
+    "enable_surprise_features": False,
+    "enable_finance_combos": True,
     "use_extended_set": True,  # expose set E_fe_oriented
 }
 
@@ -378,11 +384,19 @@ def add_finance_combos(df: pd.DataFrame) -> pd.DataFrame:
     return append_columns(df_out, new_cols)
 
 
-def add_cross_sectional_norms(df: pd.DataFrame) -> pd.DataFrame:
-    """Cross-sectional normalization per day for numeric columns (z-score per family)."""
-    if "date_id" not in df.columns:
+def add_cross_sectional_norms(df: pd.DataFrame, *, enabled: bool = True, min_group_size: int = 2) -> pd.DataFrame:
+    """Cross-sectional normalization per day for numeric columns (z-score per family).
+
+    Note: In this competition the data has 1 row per `date_id`, so cross-sectional
+    transforms are constant and add no signal. We skip automatically when groups
+    are smaller than `min_group_size`.
+    """
+    if not enabled or "date_id" not in df.columns:
         return df
     df_out = df.copy()
+    counts = df_out["date_id"].value_counts(dropna=False)
+    if counts.empty or int(counts.max()) < int(min_group_size):
+        return df_out
     families = {g: [c for c in df_out.columns if c.startswith(g) and pd.api.types.is_numeric_dtype(df_out[c])] for g in ["M", "E", "I", "P", "V"]}
     new_cols = {}
     for fam, cols in families.items():
@@ -395,35 +409,78 @@ def add_cross_sectional_norms(df: pd.DataFrame) -> pd.DataFrame:
     return append_columns(df_out, new_cols)
 
 
-def add_surprise_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Surprise = deviation from rolling 5/20 mean of the feature (numeric columns)."""
-    if "date_id" not in df.columns:
+def add_surprise_features(
+    df: pd.DataFrame,
+    *,
+    enabled: bool = True,
+    target: str | None = None,
+    windows: tuple[int, ...] = (5, 20),
+) -> pd.DataFrame:
+    """Surprise = deviation from rolling mean of selected features (time-series only).
+
+    We intentionally avoid generating surprise features from future/label columns
+    (forward_returns, market_forward_excess_returns, target) to prevent leakage.
+    """
+    if not enabled or "date_id" not in df.columns:
         return df
     df_sorted = df.loc[:, ~df.columns.duplicated()].sort_values("date_id")
-    num_cols = [c for c in df_sorted.columns if pd.api.types.is_numeric_dtype(df_sorted[c]) and c not in {"date_id"}]
+    exclude = {"date_id", "row_id", "is_scored", "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
+    if target:
+        exclude.add(target)
+
+    def _eligible(col: str) -> bool:
+        if col in exclude:
+            return False
+        if col.startswith("lagged_"):
+            return True
+        if col.endswith(("_mean", "_std", "_median")):
+            return True
+        if col in {"regime_std_20", "lagged_market_excess"}:
+            return True
+        return False
+
+    num_cols = [
+        c
+        for c in df_sorted.columns
+        if pd.api.types.is_numeric_dtype(df_sorted[c]) and _eligible(str(c))
+    ]
     new_cols = {}
     for col in num_cols:
         series = df_sorted[col]
-        if series.isna().all():
+        if series.isna().all() or series.nunique(dropna=True) <= 1:
             continue
-        roll5 = series.rolling(window=5, min_periods=3).mean()
-        roll20 = series.rolling(window=20, min_periods=5).mean()
-        new_cols[f"{col}_surprise_5"] = (series - roll5).reindex(df.index)
-        new_cols[f"{col}_surprise_20"] = (series - roll20).reindex(df.index)
+        for window in windows:
+            window = int(window)
+            if window <= 1:
+                continue
+            min_periods = max(3, window // 2)
+            roll = series.rolling(window=window, min_periods=min_periods).mean()
+            new_cols[f"{col}_surprise_{window}"] = (series - roll).reindex(df.index)
     return append_columns(df, new_cols)
 
 
 def build_feature_sets(df: pd.DataFrame, target: str, intentional_cfg: dict | None = None, fe_cfg: dict | None = None, fit_ref: pd.DataFrame | None = None) -> tuple[pd.DataFrame, dict[str, list[str]]]:
     df = df.loc[:, ~df.columns.duplicated()]
+    cfg = dict(FEATURE_CFG_DEFAULT)
+    if fe_cfg:
+        cfg.update(fe_cfg)
     orig_numeric = df.select_dtypes(include=[np.number]).columns.tolist()
     df_eng = add_lagged_market_features(df)
     df_eng = add_family_aggs(df_eng)
     df_eng = add_regime_features(df_eng, fit_ref=fit_ref)
     df_eng = add_intentional_features(df_eng, intentional_cfg=intentional_cfg)
-    df_eng = apply_feature_engineering(df_eng, target, fe_cfg=fe_cfg, fit_ref=fit_ref)
-    df_eng = add_cross_sectional_norms(df_eng)
-    df_eng = add_surprise_features(df_eng)
-    df_eng = add_finance_combos(df_eng)
+    df_eng = apply_feature_engineering(df_eng, target, fe_cfg=cfg, fit_ref=fit_ref)
+    df_eng = add_cross_sectional_norms(
+        df_eng,
+        enabled=bool(cfg.get("enable_cross_sectional_norms", False)),
+    )
+    df_eng = add_surprise_features(
+        df_eng,
+        enabled=bool(cfg.get("enable_surprise_features", False)),
+        target=target,
+    )
+    if cfg.get("enable_finance_combos", True):
+        df_eng = add_finance_combos(df_eng)
     if df_eng.columns.has_duplicates:
         df_eng = df_eng.loc[:, ~df_eng.columns.duplicated(keep="last")]
     df_eng, all_cols = prepare_features(df_eng, target)
@@ -432,17 +489,39 @@ def build_feature_sets(df: pd.DataFrame, target: str, intentional_cfg: dict | No
     if not base_cols:
         base_cols = all_cols
 
+    all_set = set(all_cols)
+
     agg_cols = [c for c in df_eng.columns if c.endswith("_mean") or c.endswith("_std")]
-    regime_cols = [c for c in df_eng.columns if c.startswith("regime_")]
-    intentional_cols = [c for c in df_eng.columns if any(k in c for k in ["lagged_excess_return", "lagged_market_excess", "_log1p", "_clip", "_tanh", "_z"])]
+    if cfg.get("add_family_medians", True):
+        agg_cols.extend([c for c in df_eng.columns if c.endswith("_median")])
+    agg_cols = list(dict.fromkeys(agg_cols))
+    agg_cols = [c for c in agg_cols if c in all_set]
+
+    regime_cols = [c for c in df_eng.columns if c.startswith("regime_") and c in all_set]
+    intentional_cols = [
+        c
+        for c in df_eng.columns
+        if (c.startswith("lagged_") or any(k in c for k in ["_log1p", "_clip", "_tanh", "_z"])) and c in all_set
+    ]
+    ratio_diff_cols = [c for c in df_eng.columns if c.endswith(("_mean_over_std", "_mean_minus_std", "_mean_minus_median")) and c in all_set]
+    combo_candidates = [
+        "lagged_excess_minus_market",
+        "lagged_market_minus_rf",
+        "M_mean_minus_V_mean",
+        "M_mean_over_V_mean",
+        "P_mean_minus_E_mean",
+        "P_mean_over_E_mean",
+    ]
+    combo_cols = [c for c in combo_candidates if c in all_set]
 
     feature_sets = {
         "A_baseline": sorted(set(base_cols)),
         "B_families": sorted(set(base_cols + agg_cols)),
         "C_regimes": sorted(set(base_cols + agg_cols + regime_cols)),
-        "D_intentional": sorted(set(base_cols + agg_cols + regime_cols + intentional_cols)),
+        "D_intentional": sorted(
+            set(base_cols + agg_cols + regime_cols + intentional_cols + ratio_diff_cols + combo_cols)
+        ),
     }
-    cfg = FEATURE_CFG_DEFAULT if fe_cfg is None else fe_cfg
     if cfg.get("use_extended_set", True):
         oriented_cols = [c for c in all_cols if c not in feature_sets["D_intentional"]]
         feature_sets["E_fe_oriented"] = sorted(set(feature_sets["D_intentional"] + oriented_cols))

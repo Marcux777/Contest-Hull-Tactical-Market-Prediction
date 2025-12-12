@@ -12,4 +12,9 @@ feature_cfg:
   add_family_medians: true
   add_ratios: true
   add_diffs: true
+  # O dataset tem 1 linha por dia -> cross-sectional por date_id degenera.
+  enable_cross_sectional_norms: false
+  # Surprise features podem explodir o número de colunas; deixe opt-in.
+  enable_surprise_features: false
+  enable_finance_combos: true
   use_extended_set: true
