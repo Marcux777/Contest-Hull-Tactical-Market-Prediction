@@ -1,0 +1,15 @@
+intentional_cfg:
+  # Clip/tanh/zscore on lagged market excess return.
+  clip_bounds: [-0.05, 0.05]
+  tanh_scale: 1.0
+  zscore_window: 20
+  zscore_clip: 5.0
+
+feature_cfg:
+  # Winsorization for skewed numeric features (applied using fit_ref for val/test).
+  winsor_quantile: 0.995
+  skew_threshold: 3.0
+  add_family_medians: true
+  add_ratios: true
+  add_diffs: true
+  use_extended_set: true

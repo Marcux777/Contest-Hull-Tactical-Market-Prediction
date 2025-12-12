@@ -12,8 +12,8 @@ import hull_tactical.models as hm  # noqa: E402
 from hull_tactical import competition, pipeline  # noqa: E402
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Treino rápido local (usa configs/ se disponível).")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Train full model and persist allocations (local run).")
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--config-dir", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("models"))
@@ -36,7 +36,6 @@ def main():
     train_only_scored = bool(run_cfg.get("train_only_scored", False))
     weight_scored = run_cfg.get("weight_scored")
     weight_unscored = run_cfg.get("weight_unscored")
-
     alloc_k = run_cfg.get("alloc_k")
     alloc_alpha = float(run_cfg.get("alloc_alpha", 1.0))
 
@@ -64,22 +63,21 @@ def main():
         alloc_alpha=alloc_alpha,
         bagging_seeds=bagging_seeds,
     )
-    output_dir = args.out_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    alloc_path = output_dir / "allocations_test.pkl"
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    alloc_path = args.out_dir / "allocations_test.pkl"
     allocations.to_pickle(alloc_path)
     summary = {
         "feature_set": feature_set,
         "target_col": target_col,
-        "feature_cfg": cfg.feature_cfg,
-        "intentional_cfg": cfg.intentional_cfg,
-        "best_params": cfg.best_params,
+        "configs_dir": str(loaded.config_dir) if loaded.config_dir else None,
         "allocation_cfg": loaded.allocation_cfg.__dict__ if loaded.allocation_cfg else None,
         "allocations_path": str(alloc_path),
     }
-    (output_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"Treino concluído. Alocações salvas em {alloc_path}")
+    (args.out_dir / "train_full_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"OK: saved allocations to {alloc_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -5,6 +5,7 @@ Kept dependency-light so it can run inside Kaggle without extra installs.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -34,6 +35,7 @@ from .features import (
     preprocess_basic,
 )
 from .allocation import AllocationConfig, apply_allocation_strategy, calibrate_global_scale
+from . import config as ht_config
 
 SEED = 42
 ALLOC_K = 1.0
@@ -76,17 +78,44 @@ class HullConfig:
     max_investment: float = MAX_INVESTMENT
 
 
-def default_config() -> HullConfig:
+def default_config(config_dir: Path | str | None = None) -> HullConfig:
+    """Returns a default HullConfig.
+
+    If `configs/` is available, its YAML/JSON values are merged on top of the
+    in-code defaults (so notebooks/scripts can iterate by editing YAML only).
+    """
+    feature_cfg = dict(FEATURE_CFG_DEFAULT)
+    intentional_cfg = dict(INTENTIONAL_CFG)
+    best_params = dict(BEST_PARAMS)
+    alloc_k = ALLOC_K
+    min_investment = MIN_INVESTMENT
+    max_investment = MAX_INVESTMENT
+
+    loaded = ht_config.load_all_configs(config_dir)
+    if loaded.feature_cfg:
+        feature_cfg.update(loaded.feature_cfg)
+    if loaded.intentional_cfg:
+        intentional_cfg.update(loaded.intentional_cfg)
+    if loaded.lgb_params:
+        best_params.update(loaded.lgb_params)
+    if isinstance(loaded.run_cfg, dict):
+        if "alloc_k" in loaded.run_cfg:
+            alloc_k = float(loaded.run_cfg["alloc_k"])
+        if "min_investment" in loaded.run_cfg:
+            min_investment = float(loaded.run_cfg["min_investment"])
+        if "max_investment" in loaded.run_cfg:
+            max_investment = float(loaded.run_cfg["max_investment"])
+
     return HullConfig(
         market_col=MARKET_COL,
         rf_col=RF_COL,
         is_scored_col=IS_SCORED_COL,
-        intentional_cfg=dict(INTENTIONAL_CFG),
-        feature_cfg=dict(FEATURE_CFG_DEFAULT),
-        best_params=dict(BEST_PARAMS),
-        alloc_k=ALLOC_K,
-        min_investment=MIN_INVESTMENT,
-        max_investment=MAX_INVESTMENT,
+        intentional_cfg=intentional_cfg,
+        feature_cfg=feature_cfg,
+        best_params=best_params,
+        alloc_k=alloc_k,
+        min_investment=min_investment,
+        max_investment=max_investment,
     )
 
 
@@ -989,7 +1018,7 @@ def make_sample_weight(df, weight_scored=1.0, weight_unscored=0.2, is_scored_col
     weight_uns = weight_scored if weight_unscored is None else weight_unscored
     if is_scored_col is None and IS_SCORED_COL in df.columns:
         is_scored_col = IS_SCORED_COL
-    if is_scored_col:
+    if is_scored_col and is_scored_col in df.columns:
         return df[is_scored_col].map({1: weight_scored, 0: weight_uns}).fillna(weight_uns).to_numpy()
     return np.ones(len(df)) * weight_scored
 
@@ -1390,6 +1419,7 @@ def train_full_and_predict_model(
     target_col,
     model_kind="lgb",
     params=None,
+    num_boost_round: int | None = None,
     alloc_k=None,
     alloc_alpha=1.0,
     intentional_cfg=None,
@@ -1432,13 +1462,10 @@ def train_full_and_predict_model(
         if params:
             params_use.update(params)
         params_use["seed"] = seed_use
-        train_ds = lgb.Dataset(prep["X_tr"], label=prep["y_tr"], weight=prep["train_weight"])
-        model = lgb.train(
-            params_use,
-            train_ds,
-            num_boost_round=int(params_use.get("num_boost_round", 400)),
-        )
-        pred_test = model.predict(prep["X_te"], num_iteration=model.best_iteration or model.current_iteration())
+        num_round = int(num_boost_round if num_boost_round is not None else params_use.pop("num_boost_round", 400))
+        model = lgb.LGBMRegressor(**params_use, n_estimators=num_round, random_state=seed_use)
+        model.fit(prep["X_tr"], prep["y_tr"], sample_weight=prep["train_weight"])
+        pred_test = model.predict(prep["X_te"])
     elif model_kind == "ridge":
         alpha = params.get("alpha", 1.0) if params else 1.0
         model = Ridge(alpha=alpha, random_state=seed_use)
@@ -1504,6 +1531,7 @@ def train_full_and_predict_returns(
     target_col,
     model_kind="lgb",
     params=None,
+    num_boost_round: int | None = None,
     intentional_cfg=None,
     fe_cfg=None,
     seed=None,
@@ -1540,13 +1568,10 @@ def train_full_and_predict_returns(
         if params:
             params_use.update(params)
         params_use["seed"] = seed_use
-        train_ds = lgb.Dataset(prep["X_tr"], label=prep["y_tr"], weight=prep["train_weight"])
-        model = lgb.train(
-            params_use,
-            train_ds,
-            num_boost_round=int(params_use.get("num_boost_round", 400)),
-        )
-        pred_test = model.predict(prep["X_te"], num_iteration=model.best_iteration or model.current_iteration())
+        num_round = int(num_boost_round if num_boost_round is not None else params_use.pop("num_boost_round", 400))
+        model = lgb.LGBMRegressor(**params_use, n_estimators=num_round, random_state=seed_use)
+        model.fit(prep["X_tr"], prep["y_tr"], sample_weight=prep["train_weight"])
+        pred_test = model.predict(prep["X_te"])
     elif model_kind == "ridge":
         alpha = params.get("alpha", 1.0) if params else 1.0
         model = Ridge(alpha=alpha, random_state=seed_use)
@@ -1646,8 +1671,8 @@ def prepare_train_test_frames(
     if df_test_base is None and df_test is not None:
         df_test_base = df_test.copy()
 
-    if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in df_train_base.columns:
-        mask_scored = df_train_base[IS_SCORED_COL] == 1
+    if train_only_scored and is_scored_col and is_scored_col in df_train_base.columns:
+        mask_scored = df_train_base[is_scored_col] == 1
         df_train_base = df_train_base.loc[mask_scored]
         df_train_raw = df_train_raw.loc[mask_scored]
 

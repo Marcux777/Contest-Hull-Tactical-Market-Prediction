@@ -1,17 +1,17 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `notebooks/`: primary work happens here; `Hull Tactical.ipynb` is mirrored as `Hull Tactical.py` via jupytext (`ipynb,py:percent`). Edit either and run `jupytext --sync notebooks/Hull\ Tactical.ipynb` to keep them aligned.
+- `notebooks/`: primary work happens here; `01_research.ipynb`/`01_research.py` e `02_submission.ipynb`/`02_submission.py` são espelhados via jupytext (`ipynb,py:percent`). Edite o `.py` e rode `jupytext --sync notebooks/01_research.py` (ou `notebooks/02_submission.py`) para manter o `.ipynb` atualizado.
 - `data/raw/`: original Kaggle files (`train.csv`, `test.csv`, `hull-tactical-market-prediction.zip`). Do not commit new data.
 - `data/processed/`: intermediate artifacts you generate; keep large files out of git.
 - `models/`, `reports/`: optional outputs (artifacts/figures). Avoid committing heavy binaries.
 - `scripts/`, `src/`: código reutilizável do projeto (pipelines, features, modelos); prefira adicionar aqui em vez de inchar notebooks.
-- **Notebook workflow**: sempre edite em `notebooks/Hull Tactical.py` e depois rode `jupytext --sync notebooks/Hull\ Tactical.ipynb` para manter o `.ipynb` atualizado.
+- **Notebook workflow**: edite `notebooks/01_research.py` (pesquisa) ou `notebooks/02_submission.py` (submissão) e rode `jupytext --sync` no arquivo editado.
 
 ## Build, Test, and Development Commands
 - Create/activate a virtual env (Python 3.10+ recommended), then install deps used in notebooks:
-  - `pip install pandas numpy seaborn matplotlib lightgbm scikit-learn kaggle jupytext`
-- Sync notebook/script: `jupytext --sync notebooks/Hull\ Tactical.ipynb`
+  - `pip install -r requirements.txt`
+- Sync notebook/script: `jupytext --sync notebooks/01_research.py` (ou `notebooks/02_submission.py`)
 - Fetch data via CLI (requires credentials): `kaggle competitions download -c hull-tactical-market-prediction -p data/raw`
 
 ## Coding Style & Naming Conventions

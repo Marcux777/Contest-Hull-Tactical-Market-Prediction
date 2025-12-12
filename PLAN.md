@@ -43,7 +43,7 @@
   - [x] Identificar e remover/deduplicar colunas que ainda chegam duplicadas no fluxo do `time_cv_lightgbm_fitref`/`build_feature_sets`, evitando que `df_sorted[c]` retorne DataFrame e gere “truth value of a Series is ambiguous”.
   - [x] Validar `time_cv_lightgbm_fitref` rodando sem erros com o feature set `D_intentional` após o ajuste (ajuste aplicado; rodar a célula para confirmar em runtime).
 - [x] Modularização notebook → src
-  - [x] Mapear blocos de código reutilizáveis no `notebooks/Hull Tactical.py` (features, validação, treino, inferência).
+  - [x] Mapear blocos de código reutilizáveis no `notebooks/01_research.py` (features, validação, treino, inferência).
   - [x] Extrair funções/helpers faltantes para `src/` (ex.: treino LightGBM, CV time-aware, pós-processamento), mantendo assinatura compatível com Kaggle.
   - [x] Atualizar o notebook para consumir os helpers modularizados e reduzir código duplicado.
   - [x] Validar importação (`py_compile`/execução a seco) e sincronizar com `jupytext --sync`.
@@ -70,3 +70,14 @@
   - [x] Treino final: blend de predições e allocation aplicado 1x.
   - [x] Adicionar testes guardrail (penalidades, regime/risk e CV OOF).
   - [x] Atualizar notebook e sincronizar via jupytext.
+- [x] Estrutura de repositório (research vs submission)
+  - [x] 3.1: Separar notebooks `01_research` e `02_submission` (jupytext).
+  - [x] 3.2: Centralizar configs em `configs/` (`features.yaml`, `lgb.yaml`, `run.yaml`) + loader em `src/hull_tactical/config.py`.
+  - [x] 3.3: Testes mínimos (`tests/test_metric.py`, `tests/test_features.py`) cobrindo métrica e guardrails de features/fit_ref.
+  - [x] Ajustar `scripts/` para ler YAML (CV/treino/submissão) e reduzir mudanças manuais no notebook.
+  - [x] Atualizar `AGENTS.md`/docs para o novo fluxo e rodar smoke-check (`pytest`, `py_compile`).
+- [x] Pontuação — alinhar CV/treino/alloc
+  - [x] 4.1: Alinhar treino final à CV (mesmo pipeline de features + num_boost_round + policy).
+  - [x] 4.2: Congelar policy `is_scored` em `configs/run.yaml` e aplicar em CV/treino final.
+  - [x] 4.3: Calibração global OOF (k/alpha) + smoothing/vol-targeting via `AllocationConfig`.
+  - [x] 4.4: Manter `02_submission` simples (bagging leve + allocation única).

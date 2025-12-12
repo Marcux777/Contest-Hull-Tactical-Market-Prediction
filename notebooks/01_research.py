@@ -14,8 +14,8 @@
 # ---
 
 # %% [markdown]
-# # Hull Tactical – Market Prediction
-# Contexto: competição Hull Tactical no Kaggle. Objetivo: explorar dados e montar baseline rápido para retornos/allocations. Métrica foco: Sharpe ajustado oficial (sempre); RMSE apenas como diagnóstico secundário.
+# # 01_research — Hull Tactical – Market Prediction
+# Notebook de pesquisa (EDA + CVs + tuning + ensembles). Para submissão rápida/reprodutível, use `02_submission`.
 
 # %% [markdown]
 # **Resumo rápido (métrica e alvo)**
@@ -303,13 +303,15 @@ if _src_dir is None and AUTO_CLONE_REPO and Path("/content").exists():
 if _src_dir is not None and str(_src_dir) not in sys.path:
     sys.path.insert(0, str(_src_dir))
     print(f"[import] Added to sys.path: {_src_dir}")
-    # Colab: por padrão, guarde dados dentro do repo clonado (mais fácil de achar).
-    if _running_in_colab() and PROJECT_ROOT_OVERRIDE:
-        try:
-            project_root = Path(PROJECT_ROOT_OVERRIDE).expanduser().resolve()
-            os.environ.setdefault("HT_DATA_DIR", str(project_root / "data"))
-        except Exception:
-            pass
+# Local/Colab: por padrão, use `data/` dentro do repo (se existir).
+if _src_dir is not None:
+    try:
+        project_root_guess = Path(_src_dir).resolve().parent
+        data_dir_guess = project_root_guess / "data"
+        if data_dir_guess.exists():
+            os.environ.setdefault("HT_DATA_DIR", str(data_dir_guess))
+    except Exception:
+        pass
 
 try:
     from hull_tactical import competition as ht_comp
@@ -327,13 +329,16 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
 
 # %% [markdown]
-# ## 1. Dados (Colab)
+# ## 1. Dados (local/Colab)
 # Este notebook **não** baixa dados via Kaggle API/CLI (evita credenciais no código).
-# Para rodar no Colab:
-# - Monte o Google Drive e copie a pasta `data/` (do seu ambiente local) para lá; OU
-# - Faça upload de `train.csv`/`test.csv` (ou do zip da competição) para uma pasta.
-# Depois, aponte `HT_DATA_DIR` (env var) para o diretório que contém `data/raw/train.csv` e `data/raw/test.csv`
-# (ou `train.csv`/`test.csv` diretamente).
+#
+# **Local (recomendado):**
+# - mantenha `data/raw/train.csv` e `data/raw/test.csv` no repo.
+# - o notebook tenta usar automaticamente `./data` do projeto via `HT_DATA_DIR`.
+#
+# **Colab:**
+# - monte o Google Drive e copie a pasta `data/` (do seu ambiente local) para lá.
+# - depois, defina `DATA_DIR_OVERRIDE` apontando para a pasta `data/` no Drive.
 
 # %%
 RUNNING_IN_COLAB = _running_in_colab()
@@ -368,7 +373,9 @@ try:
 except FileNotFoundError as exc:
     msg = (
         f"{exc}\n\n"
-        "No Colab: coloque os arquivos em uma pasta do Drive e defina `DATA_DIR_OVERRIDE`/`HT_DATA_DIR`\n"
+        f"HT_DATA_DIR atual: {os.environ.get('HT_DATA_DIR')}\n\n"
+        "Local: garanta `data/raw/train.csv` e `data/raw/test.csv` no repo (ou defina `HT_DATA_DIR`).\n"
+        "Colab: coloque os arquivos em uma pasta do Drive e defina `DATA_DIR_OVERRIDE`/`HT_DATA_DIR`\n"
         "para essa pasta (ela deve conter `raw/train.csv` e `raw/test.csv`, ou `train.csv`/`test.csv`)."
     )
     raise FileNotFoundError(msg) from exc

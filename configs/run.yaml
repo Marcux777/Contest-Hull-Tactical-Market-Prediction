@@ -1,0 +1,42 @@
+seed: 42
+target_col: target
+feature_set: D_intentional
+
+# Política única (congele aqui e use igual em CV e treino final)
+train_only_scored: false
+weight_scored: 1.0
+weight_unscored: 0.2
+
+model:
+  kind: lgb
+  num_boost_round: 200
+  # Bagging simples (seeds) para reduzir variância; vazio/1 seed = sem bagging.
+  bagging_seeds: [42, 43, 44]
+
+cv:
+  n_splits: 4
+  val_frac: 0.12
+  early_stopping_rounds: 20
+
+# Simple linear mapping baseline: alloc = clip(alpha + k * pred, [min,max])
+alloc_k: 1.0
+alloc_alpha: 1.0
+min_investment: 0.0
+max_investment: 2.0
+
+# Advanced allocation strategy (optional). Used when passed explicitly to the pipeline.
+allocation:
+  min_allocation: 0.0
+  max_allocation: 2.0
+  high_vol_k_factor: 0.6
+  risk_col: regime_std_20
+  # Smoothing (EMA): use span=5/10 etc (alpha=2/(span+1))
+  smooth_alpha: null
+  smooth_span: 10
+  delta_cap: null
+  standardize_window: null
+  standardize_clip: null
+  # Vol targeting on prediction dispersion (helps reduce strategy vol)
+  pred_vol_window: 20
+  pred_vol_power: 1.0
+  pred_vol_clip: [0.5, 2.0]

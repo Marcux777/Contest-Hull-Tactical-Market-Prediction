@@ -37,6 +37,26 @@ FEATURE_CFG_DEFAULT = {
 FEATURE_SET_NAMES = ["A_baseline", "B_families", "C_regimes", "D_intentional", "E_fe_oriented", "F_v2_intentional"]
 
 
+def _sorted_by_date(df: pd.DataFrame, date_col: str = "date_id") -> pd.DataFrame:
+    if date_col in df.columns:
+        return df.sort_values(date_col, kind="mergesort")
+    return df
+
+
+def _lagged_market_excess_sorted(df_sorted: pd.DataFrame) -> pd.Series | None:
+    """Returns a lagged market excess return series aligned to df_sorted.index.
+
+    Preference order:
+    1) `lagged_market_forward_excess_returns` (available in Kaggle test)
+    2) shift(1) of `market_forward_excess_returns` (available in train)
+    """
+    if "lagged_market_forward_excess_returns" in df_sorted.columns:
+        return pd.to_numeric(df_sorted["lagged_market_forward_excess_returns"], errors="coerce")
+    if "market_forward_excess_returns" in df_sorted.columns:
+        return pd.to_numeric(df_sorted["market_forward_excess_returns"], errors="coerce").shift(1)
+    return None
+
+
 def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[str]]:
     sort_key = "date_id" if "date_id" in df.columns else None
     df_sorted = df.sort_values(sort_key) if sort_key else df.copy()
@@ -195,21 +215,22 @@ def add_regime_features(df: pd.DataFrame, fit_ref: pd.DataFrame | None = None) -
     if "date_id" not in df.columns:
         return df
     df_out = df.copy()
-    df_sorted = df.sort_values("date_id")
-    if "market_forward_excess_returns" in df_sorted.columns:
-        lagged_market_sorted = df_sorted["market_forward_excess_returns"].shift(1)
+    df_sorted = _sorted_by_date(df_out)
+    lagged_market_sorted = _lagged_market_excess_sorted(df_sorted)
+    if lagged_market_sorted is not None:
         regime_std_sorted = lagged_market_sorted.rolling(window=20, min_periods=5).std()
-        lagged_market = lagged_market_sorted.reindex(df.index)
-        regime_std = regime_std_sorted.reindex(df.index)
+        lagged_market = lagged_market_sorted.reindex(df_out.index)
+        regime_std = regime_std_sorted.reindex(df_out.index)
 
         threshold = None
-        if fit_ref is not None and "date_id" in fit_ref.columns and "market_forward_excess_returns" in fit_ref.columns:
-            ref_sorted = fit_ref.sort_values("date_id")
-            ref_lagged = ref_sorted["market_forward_excess_returns"].shift(1)
-            ref_std = ref_lagged.rolling(window=20, min_periods=5).std()
-            thr = float(ref_std.median(skipna=True)) if ref_std.notna().any() else None
-            if thr is not None and np.isfinite(thr):
-                threshold = thr
+        if fit_ref is not None and "date_id" in fit_ref.columns:
+            ref_sorted = _sorted_by_date(fit_ref)
+            ref_lagged = _lagged_market_excess_sorted(ref_sorted)
+            if ref_lagged is not None:
+                ref_std = ref_lagged.rolling(window=20, min_periods=5).std()
+                thr = float(ref_std.median(skipna=True)) if ref_std.notna().any() else None
+                if thr is not None and np.isfinite(thr):
+                    threshold = thr
         if threshold is None:
             threshold = float(regime_std_sorted.median(skipna=True)) if regime_std_sorted.notna().any() else 0.0
 
@@ -225,11 +246,10 @@ def add_intentional_features(df: pd.DataFrame, intentional_cfg: dict | None = No
     if intentional_cfg:
         cfg.update(intentional_cfg)
     df_out = df.copy()
-    if "market_forward_excess_returns" in df_out.columns:
-        df_sorted = df_out.sort_values("date_id") if "date_id" in df_out.columns else df_out
-        excess = df_sorted["market_forward_excess_returns"]
-        lagged_excess_sorted = excess.shift(1)
-        lagged_excess = lagged_excess_sorted.reindex(df.index)
+    df_sorted = _sorted_by_date(df_out)
+    lagged_excess_sorted = _lagged_market_excess_sorted(df_sorted)
+    if lagged_excess_sorted is not None:
+        lagged_excess = lagged_excess_sorted.reindex(df_out.index)
         clip_lo, clip_hi = cfg.get("clip_bounds", (-0.05, 0.05))
         clipped = lagged_excess.clip(clip_lo, clip_hi)
         scaled = clipped * cfg.get("tanh_scale", 1.0)
@@ -245,7 +265,7 @@ def add_intentional_features(df: pd.DataFrame, intentional_cfg: dict | None = No
             z_clip = cfg.get("zscore_clip", None)
             if z_clip:
                 z = z.clip(-z_clip, z_clip)
-            df_out["lagged_excess_z"] = z.reindex(df.index).fillna(0)
+            df_out["lagged_excess_z"] = z.reindex(df_out.index).fillna(0)
     return df_out
 
 
@@ -342,9 +362,10 @@ def add_finance_combos(df: pd.DataFrame) -> pd.DataFrame:
         lhs = _to_series(df_out["lagged_excess_return"])
         rhs = _to_series(df_out["lagged_market_forward_excess_returns"])
         new_cols["lagged_excess_minus_market"] = lhs - rhs
-    if "lagged_market_forward_excess_returns" in df_out.columns and "risk_free_rate" in df_out.columns:
+    rf_col = "lagged_risk_free_rate" if "lagged_risk_free_rate" in df_out.columns else ("risk_free_rate" if "risk_free_rate" in df_out.columns else None)
+    if "lagged_market_forward_excess_returns" in df_out.columns and rf_col is not None:
         lhs = _to_series(df_out["lagged_market_forward_excess_returns"])
-        rhs = _to_series(df_out["risk_free_rate"])
+        rhs = _to_series(df_out[rf_col])
         new_cols["lagged_market_minus_rf"] = lhs - rhs
     fam_pairs = [("M_mean", "V_mean"), ("P_mean", "E_mean")]
     for a, b in fam_pairs:

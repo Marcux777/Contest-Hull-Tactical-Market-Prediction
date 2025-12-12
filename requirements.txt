@@ -1,0 +1,19 @@
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.2
+lightgbm>=4.0
+pyyaml>=6.0
+
+# Notebook / EDA
+matplotlib>=3.7
+seaborn>=0.13
+jupytext>=1.16
+
+# Tooling
+pytest>=7.0
+kaggle>=1.6
+
+# Optional (used in research notebook only)
+# optuna>=3.0
+# xgboost>=2.0
+# catboost>=1.2

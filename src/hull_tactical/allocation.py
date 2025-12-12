@@ -45,8 +45,14 @@ class AllocationConfig:
     standardize_window: int | None = None
     standardize_clip: float | None = None
 
+    # Optional volatility targeting based on prediction dispersion (rolling std of `pred_return`).
+    pred_vol_window: int | None = None
+    pred_vol_power: float = 1.0
+    pred_vol_clip: Tuple[float, float] = (0.5, 2.0)
+
     # Optional allocation smoothing / turnover control.
     smooth_alpha: float | None = 0.2  # EWMA alpha in [0,1]
+    smooth_span: int | None = None  # if set and smooth_alpha is None, alpha=2/(span+1)
     delta_cap: float | None = None  # max |Δalloc| per step
 
     def resolved_k_grid(self) -> np.ndarray:
@@ -88,6 +94,30 @@ def _standardize_signal(pred_return: pd.Series, df_context: pd.DataFrame, cfg: A
     return z.reindex(df_context.index)
 
 
+def _pred_vol_factor(pred_return: pd.Series, df_context: pd.DataFrame, cfg: AllocationConfig) -> pd.Series:
+    """Vol targeting factor based on rolling std of predictions (causal).
+
+    Uses an expanding-median reference so the factor stays near 1 on average:
+      factor_t = median(std_<=t) / (std_t + eps)
+    """
+    window = cfg.pred_vol_window
+    if window is None or window <= 1:
+        return pd.Series(1.0, index=df_context.index)
+    idx = _sorted_index(df_context, cfg.date_col)
+    s = pred_return.reindex(idx).astype(float)
+    min_periods = max(3, window // 2)
+    roll_std = s.rolling(window=window, min_periods=min_periods).std(ddof=0)
+    ref = roll_std.expanding(min_periods=min_periods).median()
+    eps = 1e-12
+    factor = (ref / (roll_std + eps)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    lo, hi = cfg.pred_vol_clip
+    factor = factor.clip(float(lo), float(hi))
+    power = float(cfg.pred_vol_power)
+    if power != 1.0:
+        factor = factor.pow(power)
+    return factor.reindex(df_context.index)
+
+
 def _regime_factor(df_context: pd.DataFrame, cfg: AllocationConfig) -> pd.Series:
     if cfg.regime_col not in df_context.columns:
         return pd.Series(1.0, index=df_context.index)
@@ -114,10 +144,13 @@ def smooth_allocation(
     *,
     date_col: str = "date_id",
     smooth_alpha: float | None = 0.2,
+    smooth_span: int | None = None,
     delta_cap: float | None = None,
 ) -> pd.Series:
     """EWMA + optional delta cap in chronological order."""
     alloc = pd.Series(allocation, index=df_context.index if df_context is not None else None, dtype=float)
+    if smooth_alpha is None and smooth_span is not None and smooth_span > 1:
+        smooth_alpha = 2.0 / (float(smooth_span) + 1.0)
     if smooth_alpha is None or smooth_alpha <= 0:
         return alloc
 
@@ -160,7 +193,7 @@ def apply_allocation_strategy(
     pred = pred.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     signal = _standardize_signal(pred, df_context, cfg)
-    k_eff = float(k) * _regime_factor(df_context, cfg) * _risk_factor(df_context, cfg)
+    k_eff = float(k) * _regime_factor(df_context, cfg) * _risk_factor(df_context, cfg) * _pred_vol_factor(pred, df_context, cfg)
     alloc = float(alpha) + k_eff * signal
     alloc = alloc.clip(cfg.min_allocation, cfg.max_allocation)
 
@@ -169,6 +202,7 @@ def apply_allocation_strategy(
         df_context,
         date_col=cfg.date_col,
         smooth_alpha=cfg.smooth_alpha,
+        smooth_span=cfg.smooth_span,
         delta_cap=cfg.delta_cap,
     )
     return alloc.clip(cfg.min_allocation, cfg.max_allocation)
@@ -244,4 +278,3 @@ __all__ = [
     "smooth_allocation",
     "calibrate_global_scale",
 ]
-

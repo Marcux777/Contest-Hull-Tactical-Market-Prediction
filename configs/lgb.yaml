@@ -1,0 +1,13 @@
+best_params:
+  learning_rate: 0.010897827897948612
+  num_leaves: 42
+  min_data_in_leaf: 388
+  feature_fraction: 0.7079417306723327
+  bagging_fraction: 0.6681010468585586
+  bagging_freq: 10
+  lambda_l1: 0.9244442250838115
+  lambda_l2: 0.16637075433315218
+  objective: regression
+  metric: rmse
+  seed: 42
+  verbosity: -1

@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
 from . import competition, data, ensemble, features
 from .allocation import AllocationConfig
 from . import models as m
@@ -20,6 +22,13 @@ def train_pipeline(
     cfg: m.HullConfig | None = None,
     target_col: str = "target",
     allocation_cfg: AllocationConfig | None = None,
+    train_only_scored: bool = False,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    num_boost_round: int | None = None,
+    alloc_k: float | None = None,
+    alloc_alpha: float = 1.0,
+    bagging_seeds: list[int] | None = None,
 ):
     """
     Minimal train pipeline using existing feature/model helpers.
@@ -48,6 +57,44 @@ def train_pipeline(
         intentional_cfg=intent_cfg,
         fe_cfg=fe_cfg,
     )
+    k_use = float(alloc_k) if alloc_k is not None else float(cfg.alloc_k)
+
+    if bagging_seeds and len(bagging_seeds) >= 2:
+        preds = []
+        for seed in bagging_seeds:
+            pred = m.train_full_and_predict_returns(
+                df_train,
+                df_test,
+                feature_cols,
+                target_col=target_col,
+                model_kind="lgb",
+                params=cfg.best_params,
+                num_boost_round=num_boost_round,
+                intentional_cfg=intent_cfg,
+                fe_cfg=fe_cfg,
+                seed=int(seed),
+                train_only_scored=train_only_scored,
+                weight_scored=weight_scored,
+                weight_unscored=weight_unscored,
+                df_train_fe=train_fe,
+                df_test_fe=test_fe,
+                feature_set=feature_used,
+                cfg=cfg,
+            )
+            preds.append(pred)
+        pred_mean = pd.concat(preds, axis=1).mean(axis=1)
+        if allocation_cfg is None:
+            alloc = m.map_return_to_alloc(pred_mean, k=k_use, intercept=float(alloc_alpha))
+            return pd.Series(alloc, index=pred_mean.index)
+        alloc_series = m.apply_allocation_strategy(
+            pred_mean,
+            test_fe,
+            k=k_use,
+            alpha=float(alloc_alpha),
+            cfg=allocation_cfg,
+        )
+        return alloc_series.reindex(pred_mean.index)
+
     allocations = train_full_and_predict_model(
         df_train,
         df_test,
@@ -55,10 +102,15 @@ def train_pipeline(
         target_col=target_col,
         model_kind="lgb",
         params=cfg.best_params,
-        alloc_k=None,
-        alloc_alpha=1.0,
+        num_boost_round=num_boost_round,
+        alloc_k=k_use,
+        alloc_alpha=float(alloc_alpha),
         intentional_cfg=intent_cfg,
         fe_cfg=fe_cfg,
+        seed=None,
+        train_only_scored=train_only_scored,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
         df_train_fe=train_fe,
         df_test_fe=test_fe,
         feature_set=feature_used,

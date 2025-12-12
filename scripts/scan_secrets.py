@@ -70,6 +70,10 @@ def scan_history() -> list[Finding]:
     target_paths = {
         "notebooks/Hull Tactical.py",
         "notebooks/Hull Tactical.ipynb",
+        "notebooks/01_research.py",
+        "notebooks/01_research.ipynb",
+        "notebooks/02_submission.py",
+        "notebooks/02_submission.ipynb",
         "kaggle.json",
         ".env",
         ".envrc",
