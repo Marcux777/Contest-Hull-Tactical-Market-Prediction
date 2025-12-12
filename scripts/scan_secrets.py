@@ -17,10 +17,36 @@ class Finding:
 TEXT_PATTERNS = [
     ("KAGGLE_KEY assignment", re.compile(r"(?m)^\s*KAGGLE_KEY\s*=\s*['\"][^'\"]+['\"]\s*(?:#.*)?$")),
     ("KAGGLE_USERNAME assignment", re.compile(r"(?m)^\s*KAGGLE_USERNAME\s*=\s*['\"][^'\"]+['\"]\s*(?:#.*)?$")),
+    ("os.environ[KAGGLE_KEY] assignment", re.compile(r"os\.environ\[\s*['\"]KAGGLE_KEY['\"]\s*\]\s*=\s*['\"][^'\"]{8,}['\"]")),
+    ("os.environ[KAGGLE_USERNAME] assignment", re.compile(r"os\.environ\[\s*['\"]KAGGLE_USERNAME['\"]\s*\]\s*=\s*['\"][^'\"]{2,}['\"]")),
+    ("os.environ.setdefault(KAGGLE_KEY, ...)", re.compile(r"os\.environ\.setdefault\(\s*['\"]KAGGLE_KEY['\"]\s*,\s*['\"][^'\"]{8,}['\"]\s*\)")),
+    ("os.environ.setdefault(KAGGLE_USERNAME, ...)", re.compile(r"os\.environ\.setdefault\(\s*['\"]KAGGLE_USERNAME['\"]\s*,\s*['\"][^'\"]{2,}['\"]\s*\)")),
+    ("export KAGGLE_KEY=...", re.compile(r"(?m)^\s*export\s+KAGGLE_KEY\s*=\s*(['\"][^'\"]{8,}['\"]|[^#\s]{8,})\s*(?:#.*)?$")),
+    ("export KAGGLE_USERNAME=...", re.compile(r"(?m)^\s*export\s+KAGGLE_USERNAME\s*=\s*(['\"][^'\"]{2,}['\"]|[^#\s]{2,})\s*(?:#.*)?$")),
+    ("YAML KAGGLE_KEY: ...", re.compile(r"(?m)^\s*KAGGLE_KEY\s*:\s*(['\"][^'\"]{8,}['\"]|[^#\s]{8,})\s*(?:#.*)?$")),
+    ("YAML KAGGLE_USERNAME: ...", re.compile(r"(?m)^\s*KAGGLE_USERNAME\s*:\s*(['\"][^'\"]{2,}['\"]|[^#\s]{2,})\s*(?:#.*)?$")),
     ("KAGGLE_KEY assignment (ipynb escaped)", re.compile(r"KAGGLE_KEY\s*=\s*\\\"[^\\\"]+\\\"\s*(?:#.*)?")),
     ("KAGGLE_USERNAME assignment (ipynb escaped)", re.compile(r"KAGGLE_USERNAME\s*=\s*\\\"[^\\\"]+\\\"\s*(?:#.*)?")),
     ("kaggle.json key", re.compile(r'"key"\s*:\s*"[^\"]{8,}"')),
+    ("kaggle.json key (ipynb escaped)", re.compile(r"\\\"key\\\"\\s*:\\s*\\\"[^\\\"]{8,}\\\"")),
 ]
+
+HISTORY_EXTS = {
+    ".py",
+    ".ipynb",
+    ".md",
+    ".yml",
+    ".yaml",
+    ".json",
+    ".toml",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".bat",
+}
+
+MAX_SCAN_BYTES = 3_000_000
 
 
 def git_ls_files() -> list[str]:
@@ -57,7 +83,7 @@ def scan_working_tree() -> list[Finding]:
         try:
             if path.is_dir() or not path.exists():
                 continue
-            if path.stat().st_size > 3_000_000:
+            if path.stat().st_size > MAX_SCAN_BYTES:
                 continue
             content = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -66,23 +92,31 @@ def scan_working_tree() -> list[Finding]:
     return findings
 
 
+def _should_scan_history_path(path: str) -> bool:
+    p = Path(path)
+    if p.name in {"kaggle.json", ".env", ".envrc"}:
+        return True
+    if p.suffix.lower() in HISTORY_EXTS:
+        return True
+    return False
+
+
 def scan_history() -> list[Finding]:
-    target_paths = {
-        "notebooks/Hull Tactical.py",
-        "notebooks/Hull Tactical.ipynb",
-        "notebooks/01_research.py",
-        "notebooks/01_research.ipynb",
-        "notebooks/02_submission.py",
-        "notebooks/02_submission.ipynb",
-        "kaggle.json",
-        ".env",
-        ".envrc",
-    }
     findings: list[Finding] = []
     for commit in git_rev_list_all():
-        files = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit], text=True).splitlines()
-        for rel in files:
-            if rel not in target_paths:
+        tree = subprocess.check_output(["git", "ls-tree", "-r", "-l", commit], text=True).splitlines()
+        for line in tree:
+            try:
+                meta, rel = line.split("\t", 1)
+            except ValueError:
+                continue
+            parts = meta.split()
+            if len(parts) < 4:
+                continue
+            size_raw = parts[3]
+            if size_raw.isdigit() and int(size_raw) > MAX_SCAN_BYTES:
+                continue
+            if not _should_scan_history_path(rel):
                 continue
             try:
                 content = git_show(commit, rel)
