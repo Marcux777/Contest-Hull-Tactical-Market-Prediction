@@ -15,8 +15,10 @@ class Finding:
 
 
 TEXT_PATTERNS = [
-    ("KAGGLE_KEY assignment", re.compile(r"(?m)^\s*KAGGLE_KEY\s*=\s*['\"][^'\"]+['\"]\s*$")),
-    ("KAGGLE_USERNAME assignment", re.compile(r"(?m)^\s*KAGGLE_USERNAME\s*=\s*['\"][^'\"]+['\"]\s*$")),
+    ("KAGGLE_KEY assignment", re.compile(r"(?m)^\s*KAGGLE_KEY\s*=\s*['\"][^'\"]+['\"]\s*(?:#.*)?$")),
+    ("KAGGLE_USERNAME assignment", re.compile(r"(?m)^\s*KAGGLE_USERNAME\s*=\s*['\"][^'\"]+['\"]\s*(?:#.*)?$")),
+    ("KAGGLE_KEY assignment (ipynb escaped)", re.compile(r"KAGGLE_KEY\s*=\s*\\\"[^\\\"]+\\\"\s*(?:#.*)?")),
+    ("KAGGLE_USERNAME assignment (ipynb escaped)", re.compile(r"KAGGLE_USERNAME\s*=\s*\\\"[^\\\"]+\\\"\s*(?:#.*)?")),
     ("kaggle.json key", re.compile(r'"key"\s*:\s*"[^\"]{8,}"')),
 ]
 
@@ -105,4 +107,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
