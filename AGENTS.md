@@ -5,7 +5,7 @@
 - `data/raw/`: original Kaggle files (`train.csv`, `test.csv`, `hull-tactical-market-prediction.zip`). Do not commit new data.
 - `data/processed/`: intermediate artifacts you generate; keep large files out of git.
 - `models/`, `reports/`: optional outputs (artifacts/figures). Avoid committing heavy binaries.
-- `scripts/`, `src/`: currently empty; prefer adding reusable code here instead of bloating notebooks.
+- `scripts/`, `src/`: código reutilizável do projeto (pipelines, features, modelos); prefira adicionar aqui em vez de inchar notebooks.
 - **Notebook workflow**: sempre edite em `notebooks/Hull Tactical.py` e depois rode `jupytext --sync notebooks/Hull\ Tactical.ipynb` para manter o `.ipynb` atualizado.
 
 ## Build, Test, and Development Commands
@@ -31,6 +31,18 @@
 ## Security & Configuration Tips
 - Set Kaggle creds via env vars `KAGGLE_USERNAME`/`KAGGLE_KEY` (or pre-create `~/.kaggle/kaggle.json` with `chmod 600`); never commit keys.
 - Large artifacts: prefer `.gitignore` entries; stage only minimal derived assets needed for review.
+
+## Regras adicionais (manutenção)
+- Trate `src/hull_tactical/` como fonte única de verdade; o notebook deve só orquestrar/EDA leve.
+- Notebook deve executar do topo ao fim em kernel limpo; evite células que dependem de execução parcial.
+- Prefira imports explícitos no notebook; evite `import *` e exponha API pública via `__all__`/`__init__.py`.
+- Funções em `src/` com docstring curta, type hints e sem side‑effects (não baixar dados nem gravar arquivos automaticamente).
+- Centralize configuração em dataclasses (`HullConfig`) e passe via parâmetros; evite globais mutáveis.
+- Dependências do pacote devem ser leves; libs pesadas/experimentais ficam opcionais e só no notebook ou `scripts/`.
+- Artefatos gerados vão para `data/processed/`, `models/` ou `reports/` e entram no `.gitignore` se forem pesados.
+- Ao adicionar/refatorar função importante, inclua teste unitário mínimo em `tests/` e rode `pytest`.
+- Nunca automatize download de dados dentro de módulos; use Kaggle CLI ou `scripts/` quando solicitado.
+- Antes de finalizar mudanças, rode smoke‑check de imports/pipeline mínimo.
 
 ## Planning Workflow
 - Antes de iniciar mudanças, crie um arquivo `.md` com o plano de modificações (ex.: `PLAN.md`) listando passos concretos.

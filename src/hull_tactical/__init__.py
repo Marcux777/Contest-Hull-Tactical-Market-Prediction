@@ -1,5 +1,5 @@
 """Hull Tactical package: data loading, features, models, pipelines."""
-from . import data, features, models, pipeline
+from . import allocation, competition, data, ensemble, features, io, models, pipeline
 from .models import (
     ALLOC_K,
     BEST_PARAMS,
@@ -28,20 +28,28 @@ from .models import (
     optimize_allocation_scale,
     prepare_train_test_frames,
     run_cv_preds,
+    run_cv_preds_fitref,
+    score_oof_predictions_with_allocation,
     sanity_shuffle_test,
     set_data_columns,
     stability_check,
     summarize_cv_metrics,
     time_cv_lightgbm,
     time_cv_lightgbm_fitref,
+    time_cv_lightgbm_fitref_oof,
     time_cv_lightgbm_weighted,
+    train_full_and_predict_returns,
     train_full_and_predict_model,
 )
 from .features import *  # noqa: F401,F403
 
 __all__ = [
+    "allocation",
+    "competition",
     "data",
+    "ensemble",
     "features",
+    "io",
     "models",
     "pipeline",
 ]

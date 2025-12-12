@@ -55,3 +55,12 @@
 - [ ] Clarificar feature sets vs pipeline
   - [x] Documentar em `features.py` os nomes/descrições dos feature sets expostos.
   - [x] Garantir notebook e scripts referenciam apenas `make_features`/feature_sets documentados.
+- [ ] Estratégia de alocação (Sharpe) — calibração e risco
+  - [x] Criar módulo dedicado de allocation (global k/alpha, regime scaling, vol targeting, smoothing).
+  - [x] Expandir `run_cv_preds`/OOF para guardar colunas de regime/date_id.
+  - [x] Calibrar k/alpha global em OOF (com smoothing) e aplicar no treino final.
+  - [x] Atualizar CV/Optuna para usar Sharpe OOF com fit_ref + allocation avançada.
+  - [x] Ensemble por predição (OOF) + calibração global (mean/weighted/stacking Ridge).
+  - [x] Treino final: blend de predições e allocation aplicado 1x.
+  - [x] Adicionar testes guardrail (penalidades, regime/risk e CV OOF).
+  - [x] Atualizar notebook e sincronizar via jupytext.

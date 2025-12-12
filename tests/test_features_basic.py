@@ -36,6 +36,10 @@ def test_make_features_no_nan_and_shape():
     )
     assert len(train_fe) == len(df_train)
     assert len(test_fe) == len(df_test)
-    assert not train_fe[feature_cols].isna().any().any()
-    assert not test_fe[feature_cols].isna().any().any()
+    # make_features pode produzir NaNs (lags/rollings). O contrato é que o
+    # preprocess_basic consiga imputar de forma consistente entre train/test.
+    train_proc, proc_cols, medians = features.preprocess_basic(train_fe, feature_cols)
+    test_proc, _, _ = features.preprocess_basic(test_fe, feature_cols, ref_cols=proc_cols, ref_medians=medians)
+    assert not train_proc.isna().any().any()
+    assert not test_proc.isna().any().any()
     assert "M1" in feature_sets[feature_used]

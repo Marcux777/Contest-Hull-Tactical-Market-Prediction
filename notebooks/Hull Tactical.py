@@ -116,29 +116,32 @@ BEST_PARAMS = {
     "verbosity": -1,
 }
 
+# %%
+# Importa o pacote local (src/) para manter o notebook enxuto.
+# (Funciona tanto rodando do root quanto de dentro de `notebooks/`.)
+import sys
+from pathlib import Path
+
+_cwd = Path.cwd()
+_src_dir = _cwd / "src"
+if not _src_dir.exists():
+    _src_dir = _cwd.parent / "src"
+if _src_dir.exists():
+    sys.path.insert(0, str(_src_dir))
+
+from hull_tactical import competition as ht_comp
+from hull_tactical import io as ht_io
+
 
 # %% [markdown]
 # ## 1. Credenciais do Kaggle (rodar primeiro)
 
 # %%
-# Setup rápido de credenciais
-KAGGLE_USERNAME = ""  # seu user Kaggle
-KAGGLE_KEY = ""       # sua key Kaggle
-
-if KAGGLE_USERNAME and KAGGLE_KEY:
-    creds = {"username": KAGGLE_USERNAME, "key": KAGGLE_KEY}
-    os.environ["KAGGLE_USERNAME"] = KAGGLE_USERNAME
-    os.environ["KAGGLE_KEY"] = KAGGLE_KEY
-    kaggle_dir = pathlib.Path("~/.kaggle").expanduser()
-    kaggle_dir.mkdir(exist_ok=True)
-    dest = kaggle_dir / "kaggle.json"
-    dest.write_text(json.dumps(creds))
-    dest.chmod(0o600)
-    os.environ["KAGGLE_JSON"] = str(dest)
-    os.environ["CUSTOM_KAGGLE_JSON"] = str(dest)
-    print("kaggle.json criado em", dest)
-else:
-    print("Preencha KAGGLE_USERNAME e KAGGLE_KEY e rode.")
+# Credenciais do Kaggle:
+# - use `~/.kaggle/kaggle.json` (com `chmod 600`) OU
+# - exporte `KAGGLE_USERNAME` e `KAGGLE_KEY` no ambiente.
+# Boa prática: nunca deixe chaves hardcoded no notebook/repo.
+print("Credenciais: use ~/.kaggle/kaggle.json ou env vars (KAGGLE_USERNAME/KAGGLE_KEY).")
 
 
 # %% [markdown]
@@ -337,107 +340,14 @@ KAGGLE_READY = ensure_kaggle_cli()
 # ## 3. Paths e verificação dos arquivos
 
 # %%
-import os
-import sys
-import pathlib
-import subprocess
-import zipfile
-import shutil
-
-COMPETITION = "hull-tactical-market-prediction"
-
-
-def pick_data_dir():
-    env_dir = os.environ.get("HT_DATA_DIR")
-    if env_dir:
-        return pathlib.Path(env_dir)
-    candidates = [
-        pathlib.Path("/kaggle/input/hull-tactical-market-prediction"),
-        pathlib.Path("..").resolve() / "data",
-        pathlib.Path.cwd() / "data",
-        pathlib.Path.cwd().parent / "data",
-        pathlib.Path("/kaggle/working/data"),
-        pathlib.Path("/content/data"),
-    ]
-    for cand in candidates:
-        try:
-            if cand.exists():
-                return cand
-        except OSError:
-            continue
-    return pathlib.Path("/content/data")
-
-
-DATA_DIR = pick_data_dir()
-SUBMISSION_DIR = DATA_DIR / "submissions"
-SUBMISSION_DIR.mkdir(parents=True, exist_ok=True)
-
-RAW_DIR = DATA_DIR / "raw"
-train_path = DATA_DIR / "train.csv"
-test_path = DATA_DIR / "test.csv"
-raw_train = RAW_DIR / "train.csv"
-raw_test = RAW_DIR / "test.csv"
-zip_path = RAW_DIR / f"{COMPETITION}.zip"
+COMPETITION = ht_io.COMPETITION_SLUG
+paths = ht_io.ensure_local_data(ht_io.get_data_paths(), competition_slug=COMPETITION, download_if_missing=False)
+DATA_DIR = paths.data_dir
+SUBMISSION_DIR = paths.submissions_dir
+RAW_DIR = paths.raw_dir
+train_path = paths.train_path
+test_path = paths.test_path
 print("DATA_DIR escolhido:", DATA_DIR.resolve())
-
-
-def download_with_kaggle():
-    kaggle_ready = bool(globals().get("KAGGLE_READY", False))
-    if not kaggle_ready:
-        print("Kaggle CLI não configurado; configure credenciais ou baixe manualmente.")
-        return False
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = ["kaggle", "competitions", "download", "-c", COMPETITION, "-p", str(RAW_DIR)]
-    print("Rodando:", " ".join(cmd))
-    try:
-        res = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        if res.stdout:
-            print(res.stdout)
-        if res.stderr:
-            print(res.stderr)
-    except subprocess.CalledProcessError as exc:  # pragma: no cover
-        print(f"Falha ao baixar com Kaggle CLI (código {exc.returncode}):")
-        if exc.stdout:
-            print(exc.stdout)
-        if exc.stderr:
-            print(exc.stderr)
-        print("Cheque termos da competição e kaggle.json em ~/.kaggle com permissão 600.")
-        return False
-    return zip_path.exists()
-
-
-def ensure_local_data():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-
-    kaggle_input = pathlib.Path("/kaggle/input/hull-tactical-market-prediction")
-    if kaggle_input.exists():
-        for src, dst in [
-            (kaggle_input / "train.csv", train_path),
-            (kaggle_input / "test.csv", test_path),
-        ]:
-            if src.exists() and not dst.exists():
-                shutil.copy(src, dst)
-
-    if train_path.exists() and test_path.exists():
-        return
-
-    if not raw_train.exists() or not raw_test.exists():
-        if not zip_path.exists():
-            download_with_kaggle()
-        if zip_path.exists():
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(RAW_DIR)
-
-    for src, dst in [(raw_train, train_path), (raw_test, test_path)]:
-        if src.exists() and not dst.exists():
-            shutil.copy(src, dst)
-
-    if not (train_path.exists() and test_path.exists()):
-        raise FileNotFoundError(f"train.csv/test.csv não encontrados em {DATA_DIR}. Preencha credenciais e baixe.")
-
-
-ensure_local_data()
 print("Usando data dir:", DATA_DIR.resolve())
 
 
@@ -449,42 +359,28 @@ train = pd.read_csv(train_path)
 test = pd.read_csv(test_path)
 print("train shape", train.shape, "test", test.shape)
 
-# Alvo principal: retorno em excesso do mercado (definido pela competição)
-possible_targets = ["market_forward_excess_returns", "target", "Target", "forward_returns"]
-preferred_target = possible_targets[0]
-available_targets = [c for c in possible_targets if c in train.columns]
-target_col = available_targets[0] if available_targets else None
-if target_col is None:
-    raise ValueError("Não encontrei coluna alvo (market_forward_excess_returns/target/forward_returns).")
-# Se só houver forward_returns, cria o retorno em excesso para deixar o alvo explícito
-if target_col == "forward_returns" and "risk_free_rate" in train.columns:
-    train["market_forward_excess_returns"] = train["forward_returns"] - train["risk_free_rate"]
-    target_col = "market_forward_excess_returns"
-    print("Fallback: usei forward_returns - risk_free_rate para criar market_forward_excess_returns como alvo.")
-elif target_col != preferred_target:
-    print(f"Aviso: alvo preferido ({preferred_target}) ausente; usando coluna '{target_col}' disponível.")
-elif target_col == preferred_target:
-    print(f"Alvo preferido encontrado: {target_col}")
-print(f"Alvo definido para modelagem: {target_col}")
+# Normaliza colunas-chave e cria `target` para o pipeline.
+_had_market_excess = "market_forward_excess_returns" in train.columns
+train, test, cols = ht_comp.prepare_train_test(train, test, normalized_target_col="target")
+if not _had_market_excess and "market_forward_excess_returns" in train.columns:
+    print("Criei `market_forward_excess_returns` via forward_returns - risk_free_rate.")
 
-TARGET_COL = target_col
-market_candidates = ["forward_returns", "market_forward_excess_returns"]
-MARKET_COL = next((c for c in market_candidates if c in train.columns), None)
-if MARKET_COL is None:
-    raise ValueError("Não encontrei coluna de retorno de mercado (forward_returns).")
-rf_candidates = ["risk_free_rate", "risk_free_returns"]
-RF_COL = next((c for c in rf_candidates if c in train.columns), None)
-if RF_COL is None:
-    raise ValueError("Não encontrei coluna de taxa livre de risco (risk_free_rate).")
-IS_SCORED_COL = "is_scored" if "is_scored" in train.columns else None
-print(f"Colunas principais -> target: {TARGET_COL} | market: {MARKET_COL} | rf: {RF_COL} | is_scored: {IS_SCORED_COL or 'ausente'}")
+TARGET_COL = cols.target_col
+target_col = TARGET_COL  # compat: células antigas usam target_col
+MARKET_COL = cols.market_col
+RF_COL = cols.rf_col
+IS_SCORED_COL = cols.is_scored_col
+print(
+    f"Colunas principais -> target: {TARGET_COL} (raw={cols.raw_target_col}) | "
+    f"market: {MARKET_COL} | rf: {RF_COL} | is_scored: {IS_SCORED_COL or 'ausente'}"
+)
 
 display(train.head())
 
 # %%
 # Série temporal do alvo por date_id (se existir)
 if "date_id" in train.columns:
-    train.plot(x="date_id", y=target_col, kind="line", figsize=(8, 3), title="Alvo ao longo do tempo")
+    train.plot(x="date_id", y=TARGET_COL, kind="line", figsize=(8, 3), title="Alvo ao longo do tempo")
     plt.show()
 
 # %% [markdown]
@@ -496,8 +392,8 @@ if "date_id" in train.columns:
 # %%
 # Série temporal de retornos acumulados (simples) como sanity check
 if "date_id" in train.columns:
-    tmp = train.sort_values("date_id")[["date_id", target_col]].copy()
-    tmp["cum_return"] = (1 + tmp[target_col].fillna(0)).cumprod()
+    tmp = train.sort_values("date_id")[["date_id", TARGET_COL]].copy()
+    tmp["cum_return"] = (1 + tmp[TARGET_COL].fillna(0)).cumprod()
     tmp.plot(x="date_id", y="cum_return", kind="line", figsize=(8, 3), title="Retorno acumulado (proxy)")
     plt.show()
 
@@ -704,457 +600,8 @@ if "regime_high_vol" in train.columns:
 
 # %% [markdown]
 # ## 7. Preparação de features
-
-# %%
-def prepare_features(df, target):
-    sort_key = "date_id" if "date_id" in df.columns else None
-    df_sorted = df.sort_values(sort_key) if sort_key else df.copy()
-    if df_sorted.columns.has_duplicates:
-        df_sorted = df_sorted.loc[:, ~df_sorted.columns.duplicated()]
-    numeric_cols = df_sorted.select_dtypes(include=[np.number]).columns.tolist()
-    drop_cols = {target, "row_id", "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
-    for col in ["date_id", "is_scored"]:
-        if col in df_sorted.columns:
-            drop_cols.add(col)
-    feature_cols = [c for c in numeric_cols if c not in drop_cols]
-    # Remove colunas constantes
-    feature_cols = [c for c in feature_cols if df_sorted[c].nunique() > 1]
-    return df_sorted, feature_cols
-
-
-def preprocess_basic(df, feature_cols, ref_cols=None, ref_medians=None):
-    feature_cols = list(dict.fromkeys(feature_cols))
-    feature_frame = df.reindex(columns=feature_cols)
-    medians = ref_medians if ref_medians is not None else feature_frame.median()
-    filled = feature_frame.fillna(medians).fillna(0)
-
-    missing_mask = feature_frame.isna()
-    if missing_mask.columns.has_duplicates:
-        missing_mask = missing_mask.loc[:, ~missing_mask.columns.duplicated()]
-    flag_source_cols = []
-    for c in feature_cols:
-        mask_c = missing_mask[c]
-        has_nan = mask_c.any().any() if isinstance(mask_c, pd.DataFrame) else bool(mask_c.any())
-        if has_nan:
-            flag_source_cols.append(c)
-    flags_df = None
-    if flag_source_cols:
-        flag_unique = list(dict.fromkeys(flag_source_cols))
-        flags_df = missing_mask[flag_unique].astype(int)
-        flags_df.columns = [f"{c}_was_nan" for c in flag_unique]
-
-    parts = [filled]
-    if flags_df is not None:
-        parts.append(flags_df)
-    df_proc = pd.concat(parts, axis=1)
-
-    if df_proc.columns.has_duplicates:
-        df_proc = df_proc.loc[:, ~df_proc.columns.duplicated()]
-    keep = [col for col in df_proc.columns if df_proc[col].std(ddof=0) > 1e-9]
-    out = df_proc[keep] if ref_cols is None else df_proc.reindex(columns=ref_cols, fill_value=0)
-    return out, list(out.columns), medians
-
-
-def time_split(df, cutoff=0.8):
-    n = int(len(df) * cutoff)
-    return df.iloc[:n].copy(), df.iloc[n:].copy()
-
-
-def append_columns(df, cols_dict):
-    """Concatena colunas derivadas de forma única para evitar fragmentação."""
-    if not cols_dict:
-        return df
-    new_df = pd.DataFrame(cols_dict, index=df.index)
-    combined = pd.concat([df, new_df], axis=1)
-    if combined.columns.has_duplicates:
-        combined = combined.loc[:, ~combined.columns.duplicated(keep="last")]
-    return combined
-
-
-def add_missing_columns(df, columns, fill_value=np.nan):
-    """Garante colunas ausentes em lote (evita fragmentação de DataFrame)."""
-    missing = [c for c in columns if c not in df.columns]
-    if not missing:
-        return df
-    filler = {c: fill_value for c in missing}
-    return append_columns(df, filler)
-
-
-def align_feature_frames(train_df, other_df, feature_cols):
-    """
-    Garante alinhamento de colunas entre treino/val/test antes do preprocess_basic:
-    - remove duplicadas mantendo a última ocorrência;
-    - adiciona colunas faltantes;
-    - descarta features completamente NaN ou constantes no treino.
-    Retorna dataframes alinhados e a lista de features válida.
-    """
-    cols_unique = list(dict.fromkeys(feature_cols))
-    train_clean = train_df.copy()
-    if train_clean.columns.has_duplicates:
-        train_clean = train_clean.loc[:, ~train_clean.columns.duplicated(keep="last")]
-
-    other_clean = None
-    if other_df is not None:
-        other_clean = other_df.copy()
-        if other_clean.columns.has_duplicates:
-            other_clean = other_clean.loc[:, ~other_clean.columns.duplicated(keep="last")]
-
-    train_clean = add_missing_columns(train_clean, cols_unique)
-    if other_clean is not None:
-        other_clean = add_missing_columns(other_clean, cols_unique)
-
-    valid_cols = []
-    for c in cols_unique:
-        series = train_clean[c]
-        if isinstance(series, pd.DataFrame):
-            series = series.iloc[:, 0]
-        if series.isna().all():
-            continue
-        if series.std(ddof=0) <= 1e-12:
-            continue
-        valid_cols.append(c)
-
-    train_clean = add_missing_columns(train_clean, valid_cols)
-    if other_clean is not None:
-        other_clean = add_missing_columns(other_clean, valid_cols)
-    return train_clean, other_clean, valid_cols
-
-
-def add_lagged_market_features(df):
-    """Adiciona colunas lagged_* para alinhar train/test com as features defasadas do teste."""
-    if "date_id" not in df.columns:
-        return df
-    out = df.copy()
-    df_sorted = df.sort_values("date_id")
-    new_cols = {}
-
-    def add_shift(src_col, dest_col):
-        if dest_col in out.columns or src_col not in df_sorted.columns:
-            return
-        shifted = df_sorted[src_col].shift(1).reindex(df.index)
-        new_cols[dest_col] = shifted
-
-    add_shift("forward_returns", "lagged_forward_returns")
-    add_shift("risk_free_rate", "lagged_risk_free_rate")
-    add_shift("market_forward_excess_returns", "lagged_market_forward_excess_returns")
-    return append_columns(out, new_cols)
-
-
-def add_family_aggs(df):
-    df_out = df.copy()
-    fams = {g: [c for c in df_out.columns if c.startswith(g)] for g in ["M", "E", "I", "P", "V"]}
-    new_cols = {}
-    for fam, cols in fams.items():
-        cols = [c for c in cols if pd.api.types.is_numeric_dtype(df_out[c])]
-        if len(cols) >= 2:
-            new_cols[f"{fam}_mean"] = df_out[cols].mean(axis=1)
-            new_cols[f"{fam}_std"] = df_out[cols].std(axis=1)
-            new_cols[f"{fam}_median"] = df_out[cols].median(axis=1)
-    return append_columns(df_out, new_cols)
-
-
-def add_regime_features(df):
-    """Cria features de regime baseadas em retornos defasados do mercado."""
-    if "date_id" not in df.columns:
-        return df
-    df_out = df.copy()
-    df_sorted = df.sort_values("date_id")
-    new_cols = {}
-    base_series = None
-    if "lagged_market_forward_excess_returns" in df_sorted.columns:
-        base_series = df_sorted["lagged_market_forward_excess_returns"]
-    elif "market_forward_excess_returns" in df_sorted.columns:
-        base_series = df_sorted["market_forward_excess_returns"].shift(1)
-    if base_series is None:
-        return df
-
-    roll_mean_5 = base_series.rolling(window=5, min_periods=1).mean()
-    roll_std_20 = base_series.rolling(window=20, min_periods=5).std()
-    roll_mean_20 = base_series.rolling(window=20, min_periods=5).mean()
-
-    new_cols["regime_mean_5"] = roll_mean_5.reindex(df.index)
-    new_cols["regime_std_20"] = roll_std_20.reindex(df.index)
-    new_cols["regime_mean_20"] = roll_mean_20.reindex(df.index)
-    new_cols["regime_high_vol"] = (roll_std_20 > roll_std_20.median()).astype(float).reindex(df.index)
-    new_cols["regime_trend_up"] = (roll_mean_20 > 0).astype(float).reindex(df.index)
-    return append_columns(df_out, new_cols)
-
-
-def add_intentional_features(df, intentional_cfg=None):
-    """Features específicas da competição: excessos defasados, transforms e clipping determinístico."""
-    cfg = dict(INTENTIONAL_CFG)
-    if intentional_cfg:
-        cfg.update(intentional_cfg)
-
-    clip_low, clip_high = cfg.get("clip_bounds", (-0.05, 0.05))
-    tanh_scale = cfg.get("tanh_scale", 1.0)
-    zscore_window = int(cfg.get("zscore_window", 20))
-    zscore_clip = cfg.get("zscore_clip", None)
-
-    df_out = df.copy()
-    new_cols = {}
-    base_series = None
-    if "lagged_market_forward_excess_returns" in df_out.columns:
-        base_series = df_out["lagged_market_forward_excess_returns"]
-    elif "market_forward_excess_returns" in df_out.columns and "date_id" in df_out.columns:
-        tmp = df_out.sort_values("date_id")["market_forward_excess_returns"].shift(1)
-        base_series = tmp.reindex(df_out.index)
-        new_cols["lagged_market_forward_excess_returns"] = base_series
-
-    if base_series is not None:
-        base_series = base_series.reindex(df_out.index)
-        new_cols["lagged_market_excess_clip"] = base_series.clip(clip_low, clip_high)
-        new_cols["lagged_market_excess_tanh"] = np.tanh(base_series * tanh_scale)
-        new_cols["lagged_market_excess_sq"] = np.square(base_series)
-        new_cols["lagged_market_excess_sign"] = np.sign(base_series)
-
-        # z-score defasado com janela ajustável
-        min_periods = max(3, zscore_window // 2)
-        roll_std = base_series.rolling(window=zscore_window, min_periods=min_periods).std()
-        z_vals = (base_series / roll_std.replace(0, np.nan)).fillna(0)
-        if zscore_clip is not None:
-            z_vals = z_vals.clip(-float(zscore_clip), float(zscore_clip))
-        new_cols["lagged_market_excess_z"] = z_vals
-
-    if "lagged_forward_returns" in df_out.columns and "lagged_risk_free_rate" in df_out.columns:
-        new_cols["lagged_excess_return"] = df_out["lagged_forward_returns"] - df_out["lagged_risk_free_rate"]
-
-    # Logs de variáveis de volatilidade (se positivas)
-    v_cols = [c for c in df_out.columns if c.startswith("V")]
-    for c in v_cols:
-        series = df_out[c]
-        try:
-            all_positive = bool(np.all(series > 0))
-        except Exception:
-            all_positive = False
-        if all_positive:
-            new_cols[c + "_log1p"] = np.log1p(series)
-    return append_columns(df_out, new_cols)
-
-
-def winsorize_skewed_features(df, target, fe_cfg, fit_ref=None):
-    """Aplica winsor/clipping bilateral em features muito skewed para reduzir outliers. Se fit_ref é fornecido, usa quantis do treino."""
-    df_out = df.copy()
-    ref = df if fit_ref is None else fit_ref
-    q = fe_cfg.get("winsor_quantile")
-    skew_thr = fe_cfg.get("skew_threshold", 3.0)
-    if q is None or q <= 0.5 or q >= 1:
-        return df_out
-    drop_cols = {target, "row_id", "date_id", "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
-    num_cols = [c for c in ref.select_dtypes(include=[np.number]).columns if c not in drop_cols]
-    new_cols = {}
-
-    def _first_series(obj):
-        if isinstance(obj, pd.Series):
-            return obj
-        if isinstance(obj, pd.DataFrame):
-            return obj.iloc[:, 0]
-        return pd.Series(obj)
-
-    for col in num_cols:
-        if col not in df_out.columns:
-            continue
-        series_ref = _first_series(ref[col])
-        series = _first_series(df_out[col])
-        if series.std(ddof=0) <= 0 or series.isna().all():
-            continue
-        skew_val = series_ref.skew(skipna=True)
-        if np.isnan(skew_val) or abs(skew_val) < skew_thr:
-            continue
-        lo = series_ref.quantile(1 - q)
-        hi = series_ref.quantile(q)
-        new_cols[col] = series.clip(lo, hi)
-    return df_out.assign(**new_cols) if new_cols else df_out
-
-
-def add_ratio_diff_features(df, fe_cfg):
-    """Adiciona razões e diferenças simples entre agregados de famílias."""
-    df_out = df.copy()
-    fams = ["M", "E", "I", "P", "V"]
-    new_cols = {}
-    def _to_series(obj):
-        if isinstance(obj, pd.DataFrame):
-            return obj.iloc[:, 0]
-        return obj
-    if fe_cfg.get("add_ratios", True) or fe_cfg.get("add_diffs", True):
-        for fam in fams:
-            mean_col = f"{fam}_mean"
-            std_col = f"{fam}_std"
-            median_col = f"{fam}_median"
-            if fe_cfg.get("add_ratios", True) and mean_col in df_out and std_col in df_out:
-                mean_ser = _to_series(df_out[mean_col])
-                std_ser = _to_series(df_out[std_col])
-                denom = std_ser.replace(0, np.nan)
-                new_cols[f"{fam}_mean_over_std"] = (mean_ser / denom).fillna(0)
-            if fe_cfg.get("add_diffs", True) and mean_col in df_out and std_col in df_out:
-                mean_ser = _to_series(df_out[mean_col])
-                std_ser = _to_series(df_out[std_col])
-                new_cols[f"{fam}_mean_minus_std"] = (mean_ser - std_ser).fillna(0)
-            if fe_cfg.get("add_ratios", True) and mean_col in df_out and median_col in df_out:
-                mean_ser = _to_series(df_out[mean_col])
-                med_ser = _to_series(df_out[median_col])
-                new_cols[f"{fam}_mean_minus_median"] = (mean_ser - med_ser).fillna(0)
-    return append_columns(df_out, new_cols)
-
-
-def apply_feature_engineering(df, target, fe_cfg=None, fit_ref=None):
-    """Pipeline parametrizável de engenharia (winsor, ratios/diffs, medianas por família). fit_ref permite aplicar quantis do treino no val/test."""
-    cfg = dict(FEATURE_CFG_DEFAULT)
-    if fe_cfg:
-        cfg.update(fe_cfg)
-    df_out = df.copy()
-    df_out = winsorize_skewed_features(df_out, target, cfg, fit_ref=fit_ref)
-    df_out = add_ratio_diff_features(df_out, cfg)
-    return df_out
-
-
-def add_finance_combos(df):
-    """Combinações simples de fatores: spreads e interações com risco/vol."""
-    df_out = df.copy()
-    df_out = df_out.loc[:, ~df_out.columns.duplicated()]  # evita misalignment por labels duplicados
-    new_cols = {}
-    def _to_series(obj):
-        if isinstance(obj, pd.DataFrame):
-            return obj.iloc[:, 0]
-        return obj
-    # Spreads de retorno defasado vs. mercado
-    if "lagged_excess_return" in df_out.columns and "lagged_market_forward_excess_returns" in df_out.columns:
-        lhs = _to_series(df_out["lagged_excess_return"])
-        rhs = _to_series(df_out["lagged_market_forward_excess_returns"])
-        new_cols["lagged_excess_minus_market"] = lhs - rhs
-    if "lagged_market_forward_excess_returns" in df_out.columns and "risk_free_rate" in df_out.columns:
-        lhs = _to_series(df_out["lagged_market_forward_excess_returns"])
-        rhs = _to_series(df_out["risk_free_rate"])
-        new_cols["lagged_market_minus_rf"] = lhs - rhs
-    # Combinações de médias por família (se existirem)
-    fam_pairs = [("M_mean", "V_mean"), ("P_mean", "E_mean")]
-    for a, b in fam_pairs:
-        if a in df_out.columns and b in df_out.columns:
-            lhs = _to_series(df_out[a])
-            rhs = _to_series(df_out[b])
-            new_cols[f"{a}_minus_{b}"] = lhs - rhs
-            denom = rhs.replace(0, np.nan)
-            new_cols[f"{a}_over_{b}"] = (lhs / denom).fillna(0)
-    return append_columns(df_out, new_cols)
-
-
-def add_cross_sectional_norms(df):
-    """Normalização cross-section por dia para colunas numéricas (z-score por família)."""
-    if "date_id" not in df.columns:
-        return df
-    df_out = df.copy()
-    families = {g: [c for c in df_out.columns if c.startswith(g) and pd.api.types.is_numeric_dtype(df_out[c])] for g in ["M", "E", "I", "P", "V"]}
-    new_cols = {}
-    for fam, cols in families.items():
-        if not cols:
-            continue
-        grp = df_out.groupby("date_id")[cols]
-        mean = grp.transform("mean")
-        std = grp.transform("std").replace(0, np.nan)
-        new_cols.update({f"{c}_cs_z": ((df_out[c] - mean[c]) / std[c]).fillna(0) for c in cols})
-    return append_columns(df_out, new_cols)
-
-
-def add_surprise_features(df):
-    """Surprise = desvio do valor atual vs média rolling 5/20 da própria feature (para colunas numéricas)."""
-    if "date_id" not in df.columns:
-        return df
-    df_sorted = df.loc[:, ~df.columns.duplicated()].sort_values("date_id")
-    num_cols = [c for c in df_sorted.columns if pd.api.types.is_numeric_dtype(df_sorted[c]) and c not in {"date_id"}]
-    new_cols = {}
-    for col in num_cols:
-        series = df_sorted[col]
-        if series.isna().all():
-            continue
-        roll5 = series.rolling(window=5, min_periods=3).mean()
-        roll20 = series.rolling(window=20, min_periods=5).mean()
-        new_cols[f"{col}_surprise_5"] = (series - roll5).reindex(df.index)
-        new_cols[f"{col}_surprise_20"] = (series - roll20).reindex(df.index)
-    return append_columns(df, new_cols)
-
-
-def build_feature_sets(df, target, intentional_cfg=None, fe_cfg=None, fit_ref=None):
-    df = df.loc[:, ~df.columns.duplicated()]
-    orig_numeric = df.select_dtypes(include=[np.number]).columns.tolist()
-    df_eng = add_lagged_market_features(df)
-    df_eng = add_family_aggs(df_eng)
-    df_eng = add_regime_features(df_eng)
-    df_eng = add_intentional_features(df_eng, intentional_cfg=intentional_cfg)
-    df_eng = apply_feature_engineering(df_eng, target, fe_cfg=fe_cfg, fit_ref=fit_ref)
-    df_eng = add_cross_sectional_norms(df_eng)
-    df_eng = add_surprise_features(df_eng)
-    df_eng = add_finance_combos(df_eng)
-    if df_eng.columns.has_duplicates:
-        df_eng = df_eng.loc[:, ~df_eng.columns.duplicated(keep="last")]
-    df_eng, all_cols = prepare_features(df_eng, target)
-
-    base_cols = [c for c in orig_numeric if c in all_cols]
-    if not base_cols:
-        base_cols = all_cols
-
-    agg_cols = [c for c in df_eng.columns if c.endswith("_mean") or c.endswith("_std")]
-    regime_cols = [c for c in df_eng.columns if c.startswith("regime_")]
-    intentional_cols = [c for c in df_eng.columns if any(k in c for k in ["lagged_excess_return", "lagged_market_excess", "_log1p", "_clip", "_tanh", "_z"])]
-
-    feature_sets = {
-        "A_baseline": sorted(set(base_cols)),
-        "B_families": sorted(set(base_cols + agg_cols)),
-        "C_regimes": sorted(set(base_cols + agg_cols + regime_cols)),
-        "D_intentional": sorted(set(base_cols + agg_cols + regime_cols + intentional_cols)),
-    }
-    if fe_cfg is None:
-        fe_cfg = FEATURE_CFG_DEFAULT
-    if fe_cfg.get("use_extended_set", True):
-        oriented_cols = [c for c in all_cols if c not in feature_sets["D_intentional"]]
-        feature_sets["E_fe_oriented"] = sorted(set(feature_sets["D_intentional"] + oriented_cols))
-        new_cols = [c for c in all_cols if c not in feature_sets["E_fe_oriented"]]
-        feature_sets["F_v2_intentional"] = sorted(set(feature_sets["E_fe_oriented"] + new_cols))
-    return df_eng, feature_sets
-
-
-def make_features(
-    train_df,
-    test_df=None,
-    target_col=TARGET_COL,
-    feature_set=None,
-    intentional_cfg=None,
-    fe_cfg=None,
-):
-    """
-    Pipeline único de features para todos os fluxos (CV, diagnósticos e treino final):
-    - lags, agregações por família, regimes, features intencionais;
-    - winsor/clipping, razões/diferenças, normalização cross-section, surprise features, combos financeiros;
-    - aplica o mesmo fit de FE no teste via fit_ref.
-    Retorna dataframes engenheirados (ainda não normalizados pelo preprocess_basic), lista de colunas do feature set escolhido e o dict de feature sets.
-    """
-    train_fe, feature_sets = build_feature_sets(train_df, target_col, intentional_cfg=intentional_cfg, fe_cfg=fe_cfg, fit_ref=None)
-    test_fe = None
-    if test_df is not None:
-        test_fe, _ = build_feature_sets(test_df, target_col, intentional_cfg=intentional_cfg, fe_cfg=fe_cfg, fit_ref=train_fe)
-    if feature_set is None:
-        feature_set = "D_intentional" if "D_intentional" in feature_sets else next(iter(feature_sets))
-    feature_cols = feature_sets.get(feature_set, next(iter(feature_sets.values())))
-    return train_fe, test_fe, feature_cols, feature_sets, feature_set
-
-
-def build_features(
-    train_df,
-    test_df=None,
-    target_col=TARGET_COL,
-    feature_set=None,
-    intentional_cfg=None,
-    fe_cfg=None,
-):
-    """Alias para manter compatibilidade com chamadas antigas; delega para make_features."""
-    return make_features(
-        train_df,
-        test_df=test_df,
-        target_col=target_col,
-        feature_set=feature_set,
-        intentional_cfg=intentional_cfg,
-        fe_cfg=fe_cfg,
-    )
-
+# As funções de engenharia e preprocessamento foram movidas para `src/hull_tactical/features.py`
+# e são importadas mais abaixo (célula de materialização do pacote).
 
 # %%
 # Helpers para materializar módulos (Kaggle/offline)
@@ -1204,6 +651,8 @@ if not PACKAGE_AVAILABLE:
 sys.path.insert(0, '.')
 from hull_tactical.features import *  # noqa: F401,F403
 
+from hull_tactical.allocation import AllocationConfig, apply_allocation_strategy
+
 import hull_tactical.models as hm
 from hull_tactical import pipeline
 from hull_tactical.models import (  # noqa: F401,F403
@@ -1224,10 +673,12 @@ from hull_tactical.models import (  # noqa: F401,F403
     stability_check,
     run_cv_preds,
     calibrate_k_from_cv_preds,
+    calibrate_k_alpha_from_cv_preds,
     expanding_holdout_eval,
     choose_scored_strategy,
     compute_sharpe_weights,
     blend_and_eval,
+    train_full_and_predict_returns,
     train_full_and_predict_model,
     prepare_train_test_frames,
     add_exp_log,
@@ -1576,49 +1027,7 @@ else:
 # - Compara treino completo vs. treino filtrado em `is_scored==1` nas avaliações.
 
 # %%
-def expanding_holdout_eval(
-    df, feature_cols, target, holdout_frac=0.12, train_only_scored=False, label="holdout", use_weights=False, weight_unscored=0.2
-):
-    if "date_id" in df.columns:
-        df_sorted = df.sort_values("date_id")
-    else:
-        df_sorted = df.copy()
-    n_hold = max(1, int(len(df_sorted) * holdout_frac))
-    train_part = df_sorted.iloc[:-n_hold]
-    holdout_part = df_sorted.iloc[-n_hold:]
-    if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in train_part.columns:
-        train_part = train_part.loc[train_part[IS_SCORED_COL] == 1]
-    if len(train_part) == 0 or len(holdout_part) == 0:
-        return None
-
-    train_aligned, holdout_aligned, cols_use = align_feature_frames(train_part, holdout_part, feature_cols)
-    tr_proc, keep_cols, medians = preprocess_basic(train_aligned, cols_use)
-    ho_proc, _, _ = preprocess_basic(holdout_aligned, cols_use, ref_cols=keep_cols, ref_medians=medians)
-    X_tr = tr_proc.drop(columns=[target], errors="ignore")
-    y_tr = train_part[target]
-    X_ho = ho_proc.drop(columns=[target], errors="ignore")
-
-    train_weight = make_sample_weight(train_aligned, weight_scored=1.0, weight_unscored=weight_unscored) if use_weights else None
-    params = {"objective": "regression", "metric": "rmse", **BEST_PARAMS}
-    model = lgb.train(params, lgb.Dataset(X_tr, label=y_tr, weight=train_weight), num_boost_round=200)
-    pred_ho = model.predict(X_ho)
-    best_k, best_alpha, _ = optimize_allocation_scale(pred_ho, holdout_part, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL)
-    alloc_ho = map_return_to_alloc(pred_ho, k=best_k, intercept=best_alpha)
-    sharpe_ho, details = adjusted_sharpe_score(
-        holdout_part, alloc_ho, market_col=MARKET_COL, rf_col=RF_COL, is_scored_col=IS_SCORED_COL
-    )
-    return {
-        "label": label,
-        "holdout_frac": holdout_frac,
-        "train_only_scored": train_only_scored,
-        "sharpe_holdout": sharpe_ho,
-        "k_best": best_k,
-        "alpha_best": best_alpha,
-        "n_train": len(train_part),
-        "n_holdout": len(holdout_part),
-        "n_scored_holdout": int(holdout_part[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in holdout_part.columns else len(holdout_part),
-        "weight_unscored": weight_unscored if use_weights else None,
-    }
+# `expanding_holdout_eval` é fornecida pelo pacote `hull_tactical.models`.
 
 # %% [markdown]
 # ### Treino scored vs. ponderado (is_scored) – comparação clara (full vs. scored_only vs. weighted)
@@ -1674,27 +1083,6 @@ for cfg in is_scored_configs:
 is_scored_df = pd.DataFrame(is_scored_results)
 if not is_scored_df.empty:
     display(is_scored_df.sort_values("holdout12_sharpe", ascending=False))
-
-
-def choose_scored_strategy(results_df, cfg_lookup, fallback="weighted_0.2"):
-    if results_df is None or results_df.empty:
-        cfg = cfg_lookup.get(fallback, {"train_only_scored": False, "weight_unscored": 1.0})
-        return {**cfg, "name": fallback, "holdout_combo": np.nan, "cv_mean": np.nan, "note": "fallback (sem métricas de comparação)"}
-    eval_df = results_df.copy()
-    eval_df["holdout_combo"] = eval_df[["holdout12_sharpe", "holdout15_sharpe"]].mean(axis=1)
-    eval_df["holdout_combo"] = eval_df["holdout_combo"].fillna(-np.inf)
-    eval_df["cv_sharpe_mean"] = eval_df["cv_sharpe_mean"].fillna(-np.inf)
-    eval_df = eval_df.sort_values(by=["holdout_combo", "cv_sharpe_mean"], ascending=False)
-    best = eval_df.iloc[0]
-    cfg = cfg_lookup.get(best["config"], cfg_lookup.get(fallback, {"train_only_scored": False, "weight_unscored": 1.0}))
-    note = f"holdout≈{best['holdout_combo']:.4f}, cv≈{best['cv_sharpe_mean']:.4f}, cfg={best['config']}"
-    return {
-        **cfg,
-        "name": best["config"],
-        "holdout_combo": float(best["holdout_combo"]),
-        "cv_mean": float(best["cv_sharpe_mean"]),
-        "note": note,
-    }
 
 
 is_scored_cfg_lookup = {c["name"]: c for c in is_scored_configs}
@@ -1772,21 +1160,6 @@ if pd.notna(sharpe_adj) and sharpe_adj != -np.inf:
 
 # %% [markdown]
 # ## 11. Ensembles (Sharpe ponderado + bagging de seeds)
-
-# %%
-def compute_sharpe_weights(metrics_map, floor=0.01):
-    """Gera pesos normalizados a partir do Sharpe médio (clipped em 0)."""
-    weights = {}
-    for name, mets in metrics_map.items():
-        if not mets:
-            continue
-        sharpe_mean = np.mean([m["sharpe"] for m in mets if m.get("sharpe") is not None])
-        if np.isfinite(sharpe_mean):
-            weights[name] = max(sharpe_mean, 0.0) + floor
-    total = sum(weights.values())
-    if total > 0:
-        weights = {k: v / total for k, v in weights.items()}
-    return weights
 
 # %%
 pred_frames = {}
@@ -1953,79 +1326,70 @@ metrics_for_weights = {name: data["metrics"] for name, data in ensemble_sources.
 ensemble_weights_sharpe = compute_sharpe_weights(metrics_for_weights, floor=0.02)
 print(f"Pesos pelo Sharpe (normalizados): {ensemble_weights_sharpe}" if ensemble_weights_sharpe else "Sem pesos de Sharpe (faltam métricas).")
 
-# Blending (média simples e ponderada pelo Sharpe) nas linhas is_scored
-def blend_and_eval(pred_frames, df_ref, target_col, weights=None):
-    alloc_dfs = []
-    oof_join = []
-    for name, df_pred in pred_frames.items():
-        if df_pred.empty:
-            continue
-        part = df_pred[df_pred["is_scored"] == 1][["alloc"]].rename(columns={"alloc": f"alloc_{name}"})
-        alloc_dfs.append(part)
-        oof_join.append(df_pred[["pred_return"]].rename(columns={"pred_return": f"pred_{name}"}))
-    if not alloc_dfs:
-        return None
-    merged = pd.concat(alloc_dfs, axis=1, join="inner")
-    pred_merged = pd.concat(oof_join, axis=1, join="inner") if oof_join else pd.DataFrame()
-    alloc_cols = [c for c in merged.columns if c.startswith("alloc_")]
-    merged["blend_mean"] = merged[alloc_cols].mean(axis=1)
-    if weights:
-        weight_map = {f"alloc_{k}": v for k, v in weights.items() if f"alloc_{k}" in alloc_cols}
-        total_w = sum(weight_map.values())
-        if total_w > 0:
-            merged["blend_weighted"] = sum(weight_map[col] * merged[col] for col in weight_map) / total_w
-    # Stacking simples: regressão Ridge em alocações OOF
-    if len(alloc_cols) >= 2:
-        from sklearn.linear_model import Ridge
-
-        alloc_stack = merged[alloc_cols]
-        ridge = Ridge(alpha=0.1, fit_intercept=True, random_state=SEED)
-        ridge.fit(alloc_stack, df_ref.loc[alloc_stack.index, target_col])
-        merged["blend_stack_ridge"] = ridge.predict(alloc_stack)
-    stats = {}
-    blend_cols = alloc_cols + ["blend_mean"]
-    for extra_col in ["blend_weighted", "blend_stack_ridge"]:
-        if extra_col in merged.columns:
-            blend_cols.append(extra_col)
-    for col in blend_cols:
-        sharpe, details = adjusted_sharpe_score(
-            df_ref.loc[merged.index],
-            merged[col],
-            market_col=MARKET_COL,
-            rf_col=RF_COL,
-            is_scored_col=IS_SCORED_COL,
-        )
-        stats[col] = {"sharpe": sharpe, "strategy_vol": details.get("strategy_vol")}
-    # Retorna também as predições OOF combinadas para diagnósticos
-    return stats, pred_merged
-
 # %% [markdown]
 # ### Calibração de k para allocation (1 + k * pred)
 
 # %%
 best_k_from_cv = None
-k_grid = np.linspace(0.2, 2.0, 13)
+k_grid = np.linspace(0.0, 2.5, 51)
+alpha_grid = [0.8, 1.0, 1.2]
 k_source = preds_lgb_bag if not preds_lgb_bag.empty else preds_lgb
-k_search_lgb, best_k_from_cv = calibrate_k_from_cv_preds(k_source, k_grid=k_grid, intercept=1.0)
+best_alpha_from_cv = None
+
+ALLOC_STRATEGY_CFG = AllocationConfig(
+    k_grid=k_grid,
+    alpha_grid=alpha_grid,
+    high_vol_k_factor=0.7,
+    risk_col="regime_std_20",
+    risk_power=1.0,
+    risk_clip=(0.5, 1.5),
+    smooth_alpha=0.2,
+    delta_cap=0.15,
+)
+
+k_search_lgb, best_k_from_cv, best_alpha_from_cv, _best_score = calibrate_k_alpha_from_cv_preds(
+    k_source,
+    allocation_cfg=ALLOC_STRATEGY_CFG,
+    pred_col="pred_return",
+    market_col=MARKET_COL,
+    rf_col=RF_COL,
+    is_scored_col="is_scored",
+)
 if not k_search_lgb.empty:
     display(k_search_lgb.head(10))
 else:
-    best_k_from_cv = None
+    best_k_from_cv, best_alpha_from_cv = None, None
 
 # Blend focado em produção (LGB bag + LGB conservador + Ridge) com pesos fixos
 production_models = ["lgb_bag", "lgb_conservative", "ridge"]
 fixed_blend_weights = {"lgb_bag": 0.4, "lgb_conservative": 0.4, "ridge": 0.2}
 pred_frames_prod = {k: v for k, v in pred_frames.items() if k in production_models}
-available_weights = {k: v for k, v in fixed_blend_weights.items() if f"alloc_{k}" in [f"alloc_{n}" for n in pred_frames_prod.keys()]}
+available_weights = {k: v for k, v in fixed_blend_weights.items() if k in pred_frames_prod}
 total_w = sum(available_weights.values())
 weights_norm = {k: v / total_w for k, v in available_weights.items()} if total_w > 0 else None
 
-blend_stats = blend_and_eval(pred_frames_prod, _df, target_col, weights=weights_norm)
-blend_preds_oof = None
+from hull_tactical.ensemble import evaluate_prediction_ensembles
+
+pred_ensemble_scores = evaluate_prediction_ensembles(
+    pred_frames_prod,
+    allocation_cfg=ALLOC_STRATEGY_CFG,
+    pred_col="pred_return",
+    market_col=MARKET_COL,
+    rf_col=RF_COL,
+    is_scored_col="is_scored",
+    fold_col="fold",
+    weights=weights_norm,
+    ridge_alpha=0.1,
+)
+blend_stats = {}
+name_map = {"pred_mean": "blend_mean", "pred_weighted": "blend_weighted", "pred_stack_ridge": "blend_stack_ridge"}
+for src_name, out_name in name_map.items():
+    if src_name in pred_ensemble_scores:
+        s = pred_ensemble_scores[src_name]
+        blend_stats[out_name] = {"sharpe": s.oof_sharpe, "strategy_vol": s.oof_details.get("strategy_vol"), "best_k": s.best_k, "best_alpha": s.best_alpha}
+
 if blend_stats:
-    if isinstance(blend_stats, tuple):
-        blend_stats, blend_preds_oof = blend_stats
-    print("\nSharpe ajustado (produção: LGB bag + LGB cons + Ridge):")
+    print("\nSharpe ajustado (produção via blend de predições + calibração global de allocation):")
     for name, vals in blend_stats.items():
         print(f"{name}: Sharpe_adj={vals['sharpe']:.4f} | vol={vals.get('strategy_vol', float('nan')):.2f}")
 else:
@@ -2033,140 +1397,6 @@ else:
 
 # %% [markdown]
 # ## 12. Treino final + submissão
-
-# %%
-def train_full_and_predict_model(
-    df_train,
-    df_test,
-    feature_cols,
-    target_col,
-    model_kind="lgb",
-    params=None,
-    alloc_k=None,
-    alloc_alpha=1.0,
-    intentional_cfg=None,
-    fe_cfg=None,
-    seed=None,
-    train_only_scored=False,
-    weight_scored=None,
-    weight_unscored=None,
-    df_train_fe=None,
-    df_test_fe=None,
-    feature_set=None,
-):
-    """Aplica pipeline de features compartilhado com a CV (via make_features), treina modelo especificado e retorna alocação."""
-    seed_use = SEED if seed is None else seed
-    np.random.seed(seed_use)
-    fe_cfg_use = FEATURE_CFG_DEFAULT if fe_cfg is None else fe_cfg
-    feature_cols_use = list(feature_cols) if feature_cols is not None else None
-    use_weights = weight_scored is not None or weight_unscored is not None
-    weight_scored = 1.0 if weight_scored is None else weight_scored
-    weight_unscored = 1.0 if weight_unscored is None else weight_unscored
-    df_train_raw = df_train.copy()
-    df_train_base = df_train_fe.copy() if df_train_fe is not None else None
-    df_test_base = df_test_fe.copy() if df_test_fe is not None else None
-
-    needs_features = df_train_base is None or (df_test is not None and df_test_base is None)
-    if not needs_features and feature_cols_use is not None:
-        missing_train = [c for c in feature_cols_use if c not in df_train_base.columns]
-        missing_test = [c for c in feature_cols_use if df_test_base is not None and c not in df_test_base.columns]
-        needs_features = bool(missing_train or missing_test)
-
-    if needs_features or feature_cols_use is None:
-        gen_train_fe, gen_test_fe, cols_gen, feature_sets_gen, feature_set_gen = make_features(
-            df_train_raw,
-            test_df=df_test,
-            target_col=target_col,
-            feature_set=feature_set,
-            intentional_cfg=intentional_cfg,
-            fe_cfg=fe_cfg_use,
-        )
-        df_train_base = gen_train_fe
-        df_test_base = gen_test_fe if gen_test_fe is not None else (df_test.copy() if df_test is not None else None)
-        chosen_set = feature_set or feature_set_gen
-        feature_cols_from_set = feature_sets_gen.get(chosen_set) if feature_sets_gen else None
-        if feature_cols_use is None or needs_features:
-            feature_cols_use = feature_cols_from_set or cols_gen
-
-    if df_test_base is None and df_test is not None:
-        df_test_base = df_test.copy()
-
-    if train_only_scored and IS_SCORED_COL and IS_SCORED_COL in df_train_base.columns:
-        mask_scored = df_train_base[IS_SCORED_COL] == 1
-        df_train_base = df_train_base.loc[mask_scored]
-        df_train_raw = df_train_raw.loc[mask_scored]
-
-    df_train_base, df_test_base, feature_cols_aligned = align_feature_frames(df_train_base, df_test_base, feature_cols_use)
-
-    df_train_proc, keep_cols, medians = preprocess_basic(df_train_base, feature_cols_aligned)
-    df_test_proc, _, _ = preprocess_basic(df_test_base, feature_cols_aligned, ref_cols=keep_cols, ref_medians=medians)
-    X_tr = df_train_proc.drop(columns=[target_col], errors="ignore")
-    y_tr = df_train_raw.loc[df_train_proc.index, target_col]
-    X_te = df_test_proc.drop(columns=[target_col], errors="ignore")
-    train_weight = (
-        make_sample_weight(df_train_raw.loc[df_train_proc.index], weight_scored=weight_scored, weight_unscored=weight_unscored)
-        if use_weights
-        else None
-    )
-
-    if model_kind == "lgb":
-        params_use = dict(BEST_PARAMS)
-        if params:
-            params_use.update(params)
-        params_use["seed"] = seed_use
-        train_ds = lgb.Dataset(X_tr, label=y_tr, weight=train_weight)
-        model = lgb.train(
-            params_use,
-            train_ds,
-            num_boost_round=int(params_use.get("num_boost_round", 400)),
-        )
-        pred_test = model.predict(X_te, num_iteration=model.best_iteration or model.current_iteration())
-    elif model_kind == "ridge":
-        alpha = params.get("alpha", 1.0) if params else 1.0
-        model = Ridge(alpha=alpha, random_state=seed_use)
-        model.fit(X_tr, y_tr, sample_weight=train_weight)
-        pred_test = model.predict(X_te)
-    elif model_kind == "cat" and HAS_CAT:
-        default = {
-            "depth": 6,
-            "learning_rate": 0.05,
-            "iterations": 500,
-            "loss_function": "RMSE",
-            "random_seed": seed_use,
-            "verbose": False,
-        }
-        if params:
-            default.update(params)
-        model = CatBoostRegressor(**default)
-        fit_kwargs = {"verbose": False}
-        if train_weight is not None:
-            fit_kwargs["sample_weight"] = train_weight
-        model.fit(X_tr, y_tr, **fit_kwargs)
-        pred_test = model.predict(X_te)
-    elif model_kind == "xgb" and HAS_XGB:
-        default = {
-            "n_estimators": 400,
-            "learning_rate": 0.05,
-            "max_depth": 6,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "random_state": seed_use,
-            "objective": "reg:squarederror",
-        }
-        if params:
-            default.update(params)
-        model = xgb.XGBRegressor(**default)
-        fit_kwargs = {"verbose": False}
-        if train_weight is not None:
-            fit_kwargs["sample_weight"] = train_weight
-        model.fit(X_tr, y_tr, **fit_kwargs)
-        pred_test = model.predict(X_te)
-    else:
-        raise ValueError(f"Modelo {model_kind} não suportado ou dependência ausente.")
-
-    k_use = alloc_k if alloc_k is not None else ALLOC_K
-    alloc_test = map_return_to_alloc(pred_test, k=k_use, intercept=alloc_alpha)
-    return pd.Series(alloc_test, index=df_test_proc.index)
 
 # %%
 # Escolhe o melhor feature set pela CV e treina em tudo; gera ensemble simples se houver outros modelos
@@ -2180,13 +1410,12 @@ for name, metrics in cv_metrics.items():
             best_set = name
 
 feature_cols_submit = feature_sets.get(best_set, feature_sets["A_baseline"])
-best_k_global = best_k_from_cv if best_k_from_cv is not None else ALLOC_K
-best_alpha_global = 1.0  # regra base: allocation = 1 + k * pred
+best_k_global = best_k_from_cv if best_k_from_cv is not None and np.isfinite(best_k_from_cv) else ALLOC_K
+best_alpha_global = best_alpha_from_cv if best_alpha_from_cv is not None and np.isfinite(best_alpha_from_cv) else 1.0
 if cv_metrics.get(best_set):
     k_candidates = [m.get("best_k") for m in cv_metrics[best_set] if m.get("best_k") is not None]
     if best_k_from_cv is None and k_candidates:
         best_k_global = float(np.median(k_candidates))
-    # alpha fica fixo em 1.0 para a regra 1 + k*pred; mantemos k da calibração CV ou mediana dos folds.
 print(f"Treino final usando feature set: {best_set} ({len(feature_cols_submit)} cols) | alpha={best_alpha_global:.2f} | k_aloc={best_k_global:.2f}")
 FINAL_TRAIN_ONLY_SCORED = bool(chosen_scored_cfg.get("train_only_scored", False))
 FINAL_WEIGHT_UNSCORED = chosen_scored_cfg.get("weight_unscored", 1.0)
@@ -2196,22 +1425,20 @@ print(
     f"train_only_scored={FINAL_TRAIN_ONLY_SCORED} | weight_unscored={FINAL_WEIGHT_UNSCORED}"
 )
 
-allocations = {}
 # Pré-computa features consistentes com o pipeline da CV para treino+teste
 train_fe_submit = train_fe_all
 test_fe_submit = test_fe_all
 
-# LightGBM com bagging de seeds
-bagging_allocs = []
+# LightGBM com bagging de seeds (blend no nível de predição)
+pred_returns = {}
+bagging_preds = []
 for seed_val in bagging_seeds:
-    alloc_seed = train_full_and_predict_model(
+    pred_seed = train_full_and_predict_returns(
         train,
         test,
         feature_cols_submit,
         target_col,
         model_kind="lgb",
-        alloc_k=best_k_global,
-        alloc_alpha=best_alpha_global,
         intentional_cfg=INTENTIONAL_CFG,
         fe_cfg=FEATURE_CFG_DEFAULT,
         seed=seed_val,
@@ -2222,18 +1449,16 @@ for seed_val in bagging_seeds:
         weight_unscored=FINAL_WEIGHT_UNSCORED,
         train_only_scored=FINAL_TRAIN_ONLY_SCORED,
     )
-    bagging_allocs.append(alloc_seed)
-if bagging_allocs:
-    allocations["lgb_bag"] = pd.concat(bagging_allocs, axis=1).mean(axis=1)
+    bagging_preds.append(pred_seed)
+if bagging_preds:
+    pred_returns["lgb_bag"] = pd.concat(bagging_preds, axis=1).mean(axis=1)
 else:
-    allocations["lgb"] = train_full_and_predict_model(
+    pred_returns["lgb"] = train_full_and_predict_returns(
         train,
         test,
         feature_cols_submit,
         target_col,
         model_kind="lgb",
-        alloc_k=best_k_global,
-        alloc_alpha=best_alpha_global,
         intentional_cfg=INTENTIONAL_CFG,
         fe_cfg=FEATURE_CFG_DEFAULT,
         feature_set=best_set,
@@ -2244,16 +1469,14 @@ else:
         train_only_scored=FINAL_TRAIN_ONLY_SCORED,
     )
 
-# LightGBM conservador para compor ensemble
-allocations["lgb_conservative"] = train_full_and_predict_model(
+# LightGBM conservador para compor ensemble (predição)
+pred_returns["lgb_conservative"] = train_full_and_predict_returns(
     train,
     test,
     feature_cols_submit,
     target_col,
     model_kind="lgb",
     params=params_conservative_use,
-    alloc_k=best_k_global,
-    alloc_alpha=best_alpha_global,
     intentional_cfg=INTENTIONAL_CFG,
     fe_cfg=FEATURE_CFG_DEFAULT,
     feature_set=best_set,
@@ -2264,15 +1487,13 @@ allocations["lgb_conservative"] = train_full_and_predict_model(
     train_only_scored=FINAL_TRAIN_ONLY_SCORED,
 )
 
-# Ridge simples como contraste
-allocations["ridge"] = train_full_and_predict_model(
+# Ridge simples como contraste (predição)
+pred_returns["ridge"] = train_full_and_predict_returns(
     train,
     test,
     feature_cols_submit,
     target_col,
     model_kind="ridge",
-    alloc_k=best_k_global,
-    alloc_alpha=best_alpha_global,
     intentional_cfg=INTENTIONAL_CFG,
     fe_cfg=FEATURE_CFG_DEFAULT,
     feature_set=best_set,
@@ -2283,19 +1504,32 @@ allocations["ridge"] = train_full_and_predict_model(
     train_only_scored=FINAL_TRAIN_ONLY_SCORED,
 )
 
-# Ensemble fixo para produção (LGB bag + LGB cons + Ridge)
+# Ensemble fixo para produção (blend no nível de predição, allocation aplicado uma vez)
 production_models_final = ["lgb_bag", "lgb_conservative", "ridge"]
 blend_weights_final = {"lgb_bag": 0.4, "lgb_conservative": 0.4, "ridge": 0.2}
-alloc_df = pd.DataFrame({k: v for k, v in allocations.items() if k in production_models_final and v is not None})
-if alloc_df.empty and allocations:
-    alloc_df = pd.DataFrame(allocations)  # fallback
-    print("Fallback: usando todos os modelos disponíveis para blend.")
-alloc_df["blend_mean"] = alloc_df.mean(axis=1)
-avail_w = {k: v for k, v in blend_weights_final.items() if k in alloc_df.columns}
+pred_df = pd.DataFrame({k: v for k, v in pred_returns.items() if k in production_models_final and v is not None})
+if pred_df.empty and pred_returns:
+    pred_df = pd.DataFrame(pred_returns)  # fallback
+    print("Fallback: usando todos os modelos disponíveis para blend de predições.")
+pred_df["blend_mean"] = pred_df.mean(axis=1)
+avail_w = {k: v for k, v in blend_weights_final.items() if k in pred_df.columns}
 tw = sum(avail_w.values())
 if avail_w and tw > 0:
-    alloc_df["blend_weighted"] = sum(avail_w[name] * alloc_df[name] for name in avail_w) / tw
-alloc_use = alloc_df["blend_weighted"] if "blend_weighted" in alloc_df.columns else alloc_df["blend_mean"]
+    pred_df["blend_weighted"] = sum(avail_w[name] * pred_df[name] for name in avail_w) / tw
+blend_used = "blend_weighted" if "blend_weighted" in pred_df.columns else "blend_mean"
+pred_use = pred_df[blend_used]
+
+k_blend = best_k_global
+alpha_blend = best_alpha_global
+if "blend_stats" in locals() and isinstance(blend_stats, dict) and blend_used in blend_stats:
+    k_candidate = blend_stats[blend_used].get("best_k")
+    alpha_candidate = blend_stats[blend_used].get("best_alpha")
+    if k_candidate is not None and np.isfinite(k_candidate):
+        k_blend = float(k_candidate)
+    if alpha_candidate is not None and np.isfinite(alpha_candidate):
+        alpha_blend = float(alpha_candidate)
+
+alloc_use = apply_allocation_strategy(pred_use, test_fe_submit, k=k_blend, alpha=alpha_blend, cfg=ALLOC_STRATEGY_CFG)
 
 row_id_col = "row_id" if "row_id" in test.columns else test.columns[0]
 submission = pd.DataFrame(
@@ -2306,14 +1540,15 @@ submission = pd.DataFrame(
 )
 sub_path = SUBMISSION_DIR / "submission_blend.csv"
 submission.to_csv(sub_path, index=False)
-print(f"Submissão salva em {sub_path.resolve()} (shape={submission.shape}) | modelos usados: {list(allocations.keys())}")
+print(f"Submissão salva em {sub_path.resolve()} (shape={submission.shape}) | modelos usados: {list(pred_returns.keys())}")
 final_submission_summary = {
     "best_feature_set": best_set,
-    "k_allocation": best_k_global,
-    "alpha_allocation": best_alpha_global,
+    "k_allocation": k_blend,
+    "alpha_allocation": alpha_blend,
     "train_strategy_name": chosen_scored_cfg.get("name"),
-    "models_used": list(allocations.keys()),
-    "blend_used": "blend_weighted" if "blend_weighted" in alloc_df.columns else "blend_mean",
+    "models_used": list(pred_returns.keys()),
+    "blend_used": blend_used,
+    "blend_level": "pred",
     "submission_path": str(sub_path.resolve()),
     "train_only_scored": FINAL_TRAIN_ONLY_SCORED,
     "weight_unscored": FINAL_WEIGHT_UNSCORED,
@@ -2327,35 +1562,6 @@ print("Resumo final:", final_submission_summary)
 # %%
 # Log centralizado: CVs e blend
 experiments_log = []
-
-
-def add_exp_log(
-    log,
-    exp_id,
-    feature_set,
-    model,
-    sharpe_mean,
-    sharpe_std,
-    n_splits=None,
-    val_frac=None,
-    params=None,
-    sharpe_lb_public=np.nan,
-    notes=None,
-):
-    log.append(
-        {
-            "exp_id": exp_id,
-            "feature_set": feature_set,
-            "model": model,
-            "n_splits": n_splits,
-            "val_frac": val_frac,
-            "sharpe_cv_mean": sharpe_mean,
-            "sharpe_cv_std": sharpe_std,
-            "sharpe_lb_public": sharpe_lb_public,
-            "params": params,
-            "notes": notes,
-        }
-    )
 
 
 if "chosen_scored_cfg" in locals():
@@ -2685,11 +1891,17 @@ for n_splits, val_frac in cv_alt_configs:
 
 # %%
 # Rodar Optuna para ajustar hiperparâmetros do LightGBM usando Sharpe médio
+# (alinhado com a métrica final: CV temporal fit_ref + calibração global de allocation em OOF)
 N_TRIALS = 40  # ajuste se quiser mais/menos
 RUN_OPTUNA = False  # troque para True para rodar os trials
 OPTUNA_WEIGHT_UNSCORED = weight_unscored_cv
 
-import optuna  # type: ignore
+try:
+    import optuna  # type: ignore
+
+    OPTUNA_AVAILABLE = True
+except Exception:
+    OPTUNA_AVAILABLE = False
 
 
 def objective(trial):
@@ -2700,7 +1912,7 @@ def objective(trial):
         "lambda_l1": trial.suggest_float("lambda_l1", 0.0, 1.0),
         "lambda_l2": trial.suggest_float("lambda_l2", 0.0, 1.0),
     }
-    metrics = pipeline.run_time_cv(
+    res = pipeline.run_time_cv_fitref_oof(
         train,
         feature_set=best_set,
         target_col=target_col,
@@ -2708,24 +1920,30 @@ def objective(trial):
         n_splits=5,
         params_override=params,
         num_boost_round=140,
-        early_stopping_rounds=12,
         val_frac=0.12,
         weight_scored=1.0,
         weight_unscored=OPTUNA_WEIGHT_UNSCORED,
-        log_prefix="[optuna]",
+        allocation_cfg=ALLOC_STRATEGY_CFG,
     )
-    if not metrics:
+    summary = res.get("summary") if isinstance(res, dict) else None
+    sharpe_mean = (summary or {}).get("sharpe_mean", np.nan)
+    if sharpe_mean is None or not np.isfinite(sharpe_mean):
         return -1e6
-    return float(np.mean([m["sharpe"] for m in metrics]))
+    return float(sharpe_mean)
 
 
 if RUN_OPTUNA:
+    if not OPTUNA_AVAILABLE:
+        raise ImportError("Optuna não está instalado. Rode `pip install optuna` para habilitar.")
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=N_TRIALS)
     print("Best params:", study.best_params)
     print("Best Sharpe:", study.best_value)
 else:
-    print("Optuna configurado; defina RUN_OPTUNA=True para executar os trials.")
+    msg = "Optuna configurado; defina RUN_OPTUNA=True para executar os trials."
+    if not OPTUNA_AVAILABLE:
+        msg += " (dependência ausente: instale com `pip install optuna`)"
+    print(msg)
 
 # %% [markdown]
 # ## 16. Sanity checks (shuffle, clipping, seeds, splits alternativos)

@@ -4,7 +4,7 @@ Kept dependency-light so it can run inside Kaggle without extra installs.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -33,6 +33,7 @@ from .features import (
     align_feature_frames,
     preprocess_basic,
 )
+from .allocation import AllocationConfig, apply_allocation_strategy, calibrate_global_scale
 
 SEED = 42
 ALLOC_K = 1.0
@@ -185,6 +186,10 @@ def time_cv_lightgbm_fitref(
     val_frac=0.12,
     params_override=None,
     num_boost_round=200,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    train_only_scored: bool = False,
+    allocation_cfg: AllocationConfig | None = None,
     cfg: HullConfig | None = None,
 ):
     """CV temporal recalculando features por fold (winsor/clipping/z-score usando apenas o treino)."""
@@ -205,37 +210,61 @@ def time_cv_lightgbm_fitref(
     params_use["objective"] = "regression"
     params_use["seed"] = SEED
 
+    use_weights = weight_scored is not None or weight_unscored is not None
+    weight_scored = 1.0 if weight_scored is None else weight_scored
+    weight_unscored = 1.0 if weight_unscored is None else weight_unscored
+
     for i, (mask_tr, mask_val) in enumerate(splits, 1):
         df_tr = df.loc[mask_tr].copy()
         df_val = df.loc[mask_val].copy()
         if df_val.empty or df_tr.empty:
             continue
+        if train_only_scored and is_scored_col and is_scored_col in df_tr.columns:
+            df_tr = df_tr.loc[df_tr[is_scored_col] == 1]
+            if df_tr.empty:
+                continue
 
-        df_tr_fe, fs_tr = build_feature_sets(
-            df_tr, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=df_tr
-        )
+        df_tr_fe, fs_tr = build_feature_sets(df_tr, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=None)
         if df_tr_fe.columns.has_duplicates:
             df_tr_fe = df_tr_fe.loc[:, ~df_tr_fe.columns.duplicated(keep="last")]
         cols = fs_tr.get(feature_set_name, next(iter(fs_tr.values())))
-        df_val_fe, _ = build_feature_sets(
-            df_val, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=df_tr
-        )
+        df_val_fe, _ = build_feature_sets(df_val, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=df_tr_fe)
         if df_val_fe.columns.has_duplicates:
             df_val_fe = df_val_fe.loc[:, ~df_val_fe.columns.duplicated(keep="last")]
         df_val_fe = df_val_fe.reindex(columns=df_tr_fe.columns, fill_value=0)
 
-        X_tr = df_tr_fe[cols]
+        df_tr_proc, keep_cols, medians = preprocess_basic(df_tr_fe, cols)
+        df_val_proc, _, _ = preprocess_basic(df_val_fe, cols, ref_cols=keep_cols, ref_medians=medians)
+        X_tr = df_tr_proc
         y_tr = df_tr_fe[target_col]
-        X_val = df_val_fe[cols]
+        X_val = df_val_proc
         y_val = df_val_fe[target_col]
 
         model = lgb.LGBMRegressor(**params_use, n_estimators=num_boost_round, random_state=SEED)
-        model.fit(X_tr, y_tr)
+        sample_weight = (
+            make_sample_weight(
+                df_tr_fe,
+                weight_scored=weight_scored,
+                weight_unscored=weight_unscored,
+                is_scored_col=is_scored_col,
+            )
+            if use_weights
+            else None
+        )
+        model.fit(X_tr, y_tr, sample_weight=sample_weight)
         pred_val = model.predict(X_val)
         best_k, best_alpha, _ = optimize_allocation_scale(
-            pred_val, df_val_fe, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
+            pred_val,
+            df_val_fe,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
+            allocation_cfg=allocation_cfg,
         )
-        alloc_val = map_return_to_alloc(pred_val, k=best_k, intercept=best_alpha)
+        if allocation_cfg is None:
+            alloc_val = map_return_to_alloc(pred_val, k=best_k, intercept=best_alpha)
+        else:
+            alloc_val = apply_allocation_strategy(pred_val, df_val_fe, k=float(best_k), alpha=float(best_alpha), cfg=allocation_cfg)
         sharpe_val, details = adjusted_sharpe_score(
             df_val_fe, alloc_val, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
         )
@@ -250,6 +279,261 @@ def time_cv_lightgbm_fitref(
             }
         )
     return metrics
+
+
+def run_cv_preds_fitref(
+    df: pd.DataFrame,
+    feature_set_name: str,
+    target_col: str,
+    *,
+    model_kind: str = "lgb",
+    params_override: dict | None = None,
+    n_splits: int = 4,
+    val_frac: float = 0.12,
+    num_boost_round: int = 200,
+    seed: int | None = None,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    train_only_scored: bool = False,
+    allocation_cfg: AllocationConfig | None = None,
+    keep_context_cols: tuple[str, ...] | None = ("date_id", "regime_std_20", "regime_high_vol"),
+    cfg: HullConfig | None = None,
+):
+    """Gera predições OOF com features recalculadas por fold (fit_ref).
+
+    Retorna:
+    - metrics: métricas por fold (com calibração local de k/alpha no próprio fold).
+    - pred_df: dataframe OOF com colunas (pred_return/alloc/target/market/rf/is_scored/fold/...).
+    """
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL
+    intent_cfg = cfg_resolved.intentional_cfg or INTENTIONAL_CFG
+    fe_cfg = cfg_resolved.feature_cfg or FEATURE_CFG_DEFAULT
+    splits = make_time_splits(df, n_splits=n_splits, val_frac=val_frac)
+    if not splits:
+        return [], pd.DataFrame()
+
+    params_use = dict(cfg_resolved.best_params or BEST_PARAMS)
+    if params_override:
+        params_use.update(params_override)
+    params_use["metric"] = "rmse"
+    params_use["objective"] = "regression"
+    seed_use = SEED if seed is None else seed
+
+    use_weights = weight_scored is not None or weight_unscored is not None
+    weight_scored = 1.0 if weight_scored is None else weight_scored
+    weight_unscored = 1.0 if weight_unscored is None else weight_unscored
+
+    metrics: list[dict] = []
+    preds: list[pd.DataFrame] = []
+
+    for i, (mask_tr, mask_val) in enumerate(splits, 1):
+        df_tr_raw = df.loc[mask_tr].copy()
+        df_val_raw = df.loc[mask_val].copy()
+        if df_tr_raw.empty or df_val_raw.empty:
+            continue
+        if train_only_scored and is_scored_col and is_scored_col in df_tr_raw.columns:
+            df_tr_raw = df_tr_raw.loc[df_tr_raw[is_scored_col] == 1]
+            if df_tr_raw.empty:
+                continue
+
+        df_tr_fe, fs_tr = build_feature_sets(df_tr_raw, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=None)
+        if df_tr_fe.columns.has_duplicates:
+            df_tr_fe = df_tr_fe.loc[:, ~df_tr_fe.columns.duplicated(keep="last")]
+        cols = fs_tr.get(feature_set_name, next(iter(fs_tr.values())))
+
+        df_val_fe, _ = build_feature_sets(df_val_raw, target_col, intentional_cfg=intent_cfg, fe_cfg=fe_cfg, fit_ref=df_tr_fe)
+        if df_val_fe.columns.has_duplicates:
+            df_val_fe = df_val_fe.loc[:, ~df_val_fe.columns.duplicated(keep="last")]
+        df_val_fe = df_val_fe.reindex(columns=df_tr_fe.columns, fill_value=0)
+
+        df_tr_proc, keep_cols, medians = preprocess_basic(df_tr_fe, cols)
+        df_val_proc, _, _ = preprocess_basic(df_val_fe, cols, ref_cols=keep_cols, ref_medians=medians)
+        X_tr = df_tr_proc
+        y_tr = df_tr_fe[target_col]
+        X_val = df_val_proc
+        y_val = df_val_fe[target_col]
+
+        sample_weight = (
+            make_sample_weight(
+                df_tr_fe,
+                weight_scored=weight_scored,
+                weight_unscored=weight_unscored,
+                is_scored_col=is_scored_col,
+            )
+            if use_weights
+            else None
+        )
+
+        if model_kind == "lgb":
+            model = lgb.LGBMRegressor(**params_use, n_estimators=num_boost_round, random_state=seed_use)
+            model.fit(X_tr, y_tr, sample_weight=sample_weight)
+            pred = model.predict(X_val)
+        elif model_kind == "ridge":
+            alpha = params_override.get("alpha", 1.0) if params_override else 1.0
+            model = Ridge(alpha=float(alpha), random_state=seed_use)
+            model.fit(X_tr, y_tr, sample_weight=sample_weight)
+            pred = model.predict(X_val)
+        elif model_kind == "xgb" and HAS_XGB:
+            default = {
+                "n_estimators": num_boost_round,
+                "learning_rate": 0.05,
+                "max_depth": 6,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "random_state": seed_use,
+                "objective": "reg:squarederror",
+            }
+            if params_override:
+                default.update(params_override)
+            model = xgb.XGBRegressor(**default)
+            fit_kwargs = {"verbose": False}
+            if sample_weight is not None:
+                fit_kwargs["sample_weight"] = sample_weight
+            model.fit(X_tr, y_tr, **fit_kwargs)
+            pred = model.predict(X_val)
+        elif model_kind == "cat" and HAS_CAT:
+            default = {
+                "depth": 6,
+                "learning_rate": 0.05,
+                "iterations": num_boost_round,
+                "loss_function": "RMSE",
+                "random_seed": seed_use,
+                "verbose": False,
+            }
+            if params_override:
+                default.update(params_override)
+            model = CatBoostRegressor(**default)
+            fit_kwargs = {"verbose": False}
+            if sample_weight is not None:
+                fit_kwargs["sample_weight"] = sample_weight
+            model.fit(X_tr, y_tr, **fit_kwargs)
+            pred = model.predict(X_val)
+        else:
+            continue
+
+        best_k, best_alpha, _ = optimize_allocation_scale(
+            pred,
+            df_val_fe,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
+            allocation_cfg=allocation_cfg,
+        )
+        if allocation_cfg is None:
+            alloc = map_return_to_alloc(pred, k=best_k, intercept=best_alpha)
+        else:
+            alloc = apply_allocation_strategy(pred, df_val_fe, k=float(best_k), alpha=float(best_alpha), cfg=allocation_cfg)
+
+        sharpe_adj, details = adjusted_sharpe_score(
+            df_val_fe,
+            pd.Series(alloc, index=df_val_fe.index),
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
+        )
+        n_scored = int(df_val_fe[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val_fe.columns else len(df_val_fe)
+        if pd.notna(sharpe_adj) and np.isfinite(sharpe_adj):
+            metrics.append(
+                {
+                    "fold": i,
+                    "sharpe": float(sharpe_adj),
+                    "best_alpha": float(best_alpha),
+                    "best_k": float(best_k),
+                    "n_val": int(len(df_val_fe)),
+                    "n_scored": int(n_scored),
+                    "strategy_vol": details.get("strategy_vol"),
+                    "seed": int(seed_use),
+                }
+            )
+
+        preds.append(
+            pd.DataFrame(
+                {
+                    "alloc": alloc,
+                    "pred_return": pred,
+                    "target": y_val,
+                    market_col or "forward_returns": df_val_fe.get(market_col) if market_col else df_val_fe.get("forward_returns"),
+                    rf_col or "risk_free_rate": df_val_fe.get(rf_col) if rf_col else df_val_fe.get("risk_free_rate"),
+                    is_scored_col or "is_scored": df_val_fe[is_scored_col] if is_scored_col and is_scored_col in df_val_fe.columns else 1,
+                    "fold": i,
+                    "seed": seed_use,
+                    **{
+                        c: df_val_fe[c]
+                        for c in (keep_context_cols or ())
+                        if c in df_val_fe.columns and c not in {"alloc", "pred_return", "target"}
+                    },
+                },
+                index=df_val_fe.index,
+            )
+        )
+
+    return metrics, (pd.concat(preds) if preds else pd.DataFrame())
+
+
+def time_cv_lightgbm_fitref_oof(
+    df: pd.DataFrame,
+    feature_set_name: str,
+    target_col: str,
+    *,
+    n_splits: int = 4,
+    val_frac: float = 0.12,
+    params_override: dict | None = None,
+    num_boost_round: int = 200,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    train_only_scored: bool = False,
+    allocation_cfg: AllocationConfig | None = None,
+    return_oof_df: bool = False,
+    cfg: HullConfig | None = None,
+):
+    """CV fit_ref com calibração global de allocation em OOF concatenado."""
+    _, pred_df = run_cv_preds_fitref(
+        df,
+        feature_set_name,
+        target_col,
+        model_kind="lgb",
+        params_override=params_override,
+        n_splits=n_splits,
+        val_frac=val_frac,
+        num_boost_round=num_boost_round,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
+        train_only_scored=train_only_scored,
+        allocation_cfg=None,  # OOF global calibra depois; evita "melhor k por fold"
+        cfg=cfg,
+    )
+
+    cfg_resolved = _resolve_cfg(cfg)
+    market_col = cfg_resolved.market_col or MARKET_COL
+    rf_col = cfg_resolved.rf_col or RF_COL
+    is_scored_col = cfg_resolved.is_scored_col or IS_SCORED_COL or "is_scored"
+
+    scored = score_oof_predictions_with_allocation(
+        pred_df,
+        allocation_cfg=allocation_cfg or AllocationConfig(),
+        pred_col="pred_return",
+        market_col=market_col,
+        rf_col=rf_col,
+        is_scored_col=is_scored_col,
+        fold_col="fold",
+    )
+    metrics = scored["metrics"]
+    summary = summarize_cv_metrics(metrics) or {}
+    out = {
+        "metrics": metrics,
+        "summary": summary,
+        "oof_sharpe": scored.get("oof_sharpe"),
+        "oof_details": scored.get("oof_details"),
+        "best_k": getattr(scored.get("calibration"), "best_k", np.nan),
+        "best_alpha": getattr(scored.get("calibration"), "best_alpha", np.nan),
+        "search_results": getattr(scored.get("calibration"), "results", pd.DataFrame()),
+    }
+    if return_oof_df:
+        out["oof_pred_df"] = pred_df.assign(alloc_calibrated=scored["alloc"])
+    return out
 
 
 def make_time_splits(df, date_col="date_id", n_splits=5, val_frac=0.1, min_train_frac=0.5):
@@ -386,30 +670,170 @@ def adjusted_sharpe_score(
 
 
 def optimize_allocation_scale(
-    pred_returns, df_eval, k_grid=None, alpha_grid=None, market_col=None, rf_col=None, is_scored_col=None
+    pred_returns,
+    df_eval,
+    k_grid=None,
+    alpha_grid=None,
+    market_col=None,
+    rf_col=None,
+    is_scored_col=None,
+    allocation_cfg: AllocationConfig | None = None,
 ):
-    """Busca simples em k e intercepto (alpha) para maximizar a métrica oficial no conjunto de validação."""
-    if k_grid is None:
-        k_grid = np.linspace(0.0, 2.5, 16)
-    if alpha_grid is None:
-        alpha_grid = [0.5, 1.0, 1.5]
+    """Busca em (k, alpha) para maximizar a métrica oficial no conjunto de avaliação.
+
+    Se `allocation_cfg` for fornecido, otimiza o fluxo completo de allocation (regime/risk/smoothing).
+    Caso contrário, cai para o mapeamento linear simples (alpha + k * pred, com clip).
+    """
+    if df_eval is None or len(df_eval) == 0:
+        return np.nan, np.nan, np.nan
+
     market_use = market_col or MARKET_COL or "forward_returns"
     rf_use = rf_col or RF_COL or "risk_free_rate"
     scored_col = is_scored_col or IS_SCORED_COL
-    best_k = ALLOC_K
-    best_alpha = 1.0
-    best_score = -np.inf
-    for alpha in alpha_grid:
-        for k in k_grid:
-            alloc = pd.Series(map_return_to_alloc(pred_returns, k=k, intercept=alpha), index=df_eval.index)
-            score, _ = adjusted_sharpe_score(
-                df_eval, alloc, market_col=market_use, rf_col=rf_use, is_scored_col=scored_col
-            )
-            if pd.notna(score) and score > best_score:
-                best_score = score
-                best_k = k
-                best_alpha = alpha
-    return best_k, best_alpha, best_score
+
+    if allocation_cfg is None:
+        # Compatível com a regra base 1 + k*pred: sem regime/risk/smoothing por padrão.
+        cfg = AllocationConfig(
+            k_grid=np.linspace(0.0, 3.0, 61) if k_grid is None else k_grid,
+            alpha_grid=np.asarray([0.8, 1.0, 1.2]) if alpha_grid is None else alpha_grid,
+            high_vol_k_factor=1.0,
+            risk_col=None,
+            smooth_alpha=None,
+            delta_cap=None,
+            standardize_window=None,
+            standardize_clip=None,
+        )
+    else:
+        cfg = allocation_cfg
+        if k_grid is not None or alpha_grid is not None:
+            cfg = replace(cfg, k_grid=k_grid if k_grid is not None else cfg.k_grid, alpha_grid=alpha_grid if alpha_grid is not None else cfg.alpha_grid)
+
+    pred_series = pd.Series(pred_returns, index=df_eval.index, dtype=float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    eval_df = df_eval.copy()
+    pred_col = "__pred_return"
+    while pred_col in eval_df.columns:
+        pred_col = f"_{pred_col}"
+    eval_df[pred_col] = pred_series
+
+    calib = calibrate_global_scale(
+        eval_df,
+        cfg,
+        pred_col=pred_col,
+        market_col=market_use,
+        rf_col=rf_use,
+        is_scored_col=scored_col or "is_scored",
+    )
+    return calib.best_k, calib.best_alpha, calib.best_score
+
+
+def score_oof_predictions_with_allocation(
+    pred_df: pd.DataFrame,
+    *,
+    allocation_cfg: AllocationConfig | None = None,
+    pred_col: str = "pred_return",
+    market_col: str | None = None,
+    rf_col: str | None = None,
+    is_scored_col: str = "is_scored",
+    fold_col: str = "fold",
+):
+    """Calibra (k, alpha) globalmente em OOF e reporta Sharpe por fold e no OOF inteiro."""
+    if pred_df is None or pred_df.empty or pred_col not in pred_df.columns:
+        return {
+            "calibration": None,
+            "oof_sharpe": np.nan,
+            "oof_details": {},
+            "metrics": [],
+            "alloc": pd.Series(dtype=float),
+        }
+
+    market_use = market_col or MARKET_COL or "forward_returns"
+    rf_use = rf_col or RF_COL or "risk_free_rate"
+    cfg = allocation_cfg or AllocationConfig()
+
+    calib = calibrate_global_scale(
+        pred_df,
+        cfg,
+        pred_col=pred_col,
+        market_col=market_use,
+        rf_col=rf_use,
+        is_scored_col=is_scored_col,
+    )
+    if not np.isfinite(calib.best_k) or not np.isfinite(calib.best_alpha):
+        return {
+            "calibration": calib,
+            "oof_sharpe": np.nan,
+            "oof_details": {},
+            "metrics": [],
+            "alloc": pd.Series(index=pred_df.index, dtype=float),
+        }
+
+    alloc = apply_allocation_strategy(
+        pred_df[pred_col],
+        pred_df,
+        k=float(calib.best_k),
+        alpha=float(calib.best_alpha),
+        cfg=cfg,
+    )
+    oof_sharpe, oof_details = adjusted_sharpe_score(
+        pred_df,
+        alloc,
+        market_col=market_use,
+        rf_col=rf_use,
+        is_scored_col=is_scored_col,
+    )
+
+    metrics: list[dict] = []
+    if fold_col in pred_df.columns and pred_df[fold_col].notna().any():
+        folds = sorted(pd.Series(pred_df[fold_col]).dropna().unique().tolist())
+    else:
+        folds = [None]
+
+    for fold in folds:
+        if fold is None:
+            df_slice = pred_df
+            alloc_slice = alloc
+            fold_label = 0
+        else:
+            df_slice = pred_df.loc[pred_df[fold_col] == fold]
+            alloc_slice = alloc.reindex(df_slice.index)
+            fold_label = int(fold) if pd.notna(fold) else 0
+        if df_slice.empty:
+            continue
+        sharpe, details = adjusted_sharpe_score(
+            df_slice,
+            alloc_slice,
+            market_col=market_use,
+            rf_col=rf_use,
+            is_scored_col=is_scored_col,
+        )
+        const_sharpe, _ = adjusted_sharpe_score(
+            df_slice,
+            pd.Series(1.0, index=df_slice.index),
+            market_col=market_use,
+            rf_col=rf_use,
+            is_scored_col=is_scored_col,
+        )
+        n_scored = int(df_slice[is_scored_col].sum()) if is_scored_col in df_slice.columns else len(df_slice)
+        metrics.append(
+            {
+                "fold": fold_label,
+                "sharpe": float(sharpe),
+                "best_k": float(calib.best_k),
+                "best_alpha": float(calib.best_alpha),
+                "n_val": len(df_slice),
+                "n_scored": n_scored,
+                "strategy_vol": details.get("strategy_vol"),
+                "const_sharpe": float(const_sharpe) if const_sharpe is not None else np.nan,
+            }
+        )
+
+    return {
+        "calibration": calib,
+        "oof_sharpe": float(oof_sharpe),
+        "oof_details": oof_details,
+        "metrics": metrics,
+        "alloc": alloc,
+    }
 
 
 def time_cv_lightgbm(
@@ -629,6 +1053,7 @@ def run_cv_preds(
     weight_unscored=None,
     train_only_scored=False,
     cfg: HullConfig | None = None,
+    keep_context_cols: tuple[str, ...] | None = ("date_id", "regime_std_20", "regime_high_vol"),
 ):
     cfg_resolved = _resolve_cfg(cfg)
     market_col = cfg_resolved.market_col or MARKET_COL
@@ -757,6 +1182,11 @@ def run_cv_preds(
                     "is_scored": df_val[is_scored_col] if is_scored_col and is_scored_col in df_val.columns else 1,
                     "fold": i,
                     "seed": seed_use,
+                    **{
+                        c: df_val_aligned[c]
+                        for c in (keep_context_cols or ())
+                        if c in df_val_aligned.columns and c not in {"alloc", "pred_return", "target"}
+                    },
                 },
                 index=X_val.index,
             )
@@ -790,6 +1220,32 @@ def calibrate_k_from_cv_preds(pred_df, k_grid=None, intercept=1.0):
     best_row = res_df.iloc[0]
     best_k = float(best_row["k"])
     return res_df, best_k
+
+
+def calibrate_k_alpha_from_cv_preds(
+    pred_df: pd.DataFrame,
+    *,
+    allocation_cfg: AllocationConfig | None = None,
+    k_grid=None,
+    alpha_grid=None,
+    pred_col: str = "pred_return",
+    market_col: str | None = None,
+    rf_col: str | None = None,
+    is_scored_col: str = "is_scored",
+):
+    """Global calibration for (k, alpha) on concatenated OOF predictions."""
+    cfg = allocation_cfg or AllocationConfig(k_grid=k_grid, alpha_grid=alpha_grid)
+    market_use = market_col or MARKET_COL or "forward_returns"
+    rf_use = rf_col or RF_COL or "risk_free_rate"
+    res = calibrate_global_scale(
+        pred_df,
+        cfg,
+        pred_col=pred_col,
+        market_col=market_use,
+        rf_col=rf_use,
+        is_scored_col=is_scored_col,
+    )
+    return res.results, res.best_k, res.best_alpha, res.best_score
 
 
 def expanding_holdout_eval(
@@ -945,6 +1401,7 @@ def train_full_and_predict_model(
     df_train_fe=None,
     df_test_fe=None,
     feature_set=None,
+    allocation_cfg: AllocationConfig | None = None,
     cfg: HullConfig | None = None,
 ):
     """Aplica pipeline de features compartilhado com a CV, treina modelo especificado e retorna alocação."""
@@ -1026,8 +1483,114 @@ def train_full_and_predict_model(
         raise ValueError(f"Modelo {model_kind} não suportado ou dependência ausente.")
 
     k_use = alloc_k if alloc_k is not None else cfg_resolved.alloc_k
-    alloc_test = map_return_to_alloc(pred_test, k=k_use, intercept=alloc_alpha)
-    return pd.Series(alloc_test, index=prep["df_test_index"])
+    if allocation_cfg is None:
+        alloc_test = map_return_to_alloc(pred_test, k=k_use, intercept=alloc_alpha)
+        return pd.Series(alloc_test, index=prep["df_test_index"])
+
+    alloc_series = apply_allocation_strategy(
+        pred_test,
+        prep["df_test_base"],
+        k=float(k_use),
+        alpha=float(alloc_alpha),
+        cfg=allocation_cfg,
+    )
+    return alloc_series.reindex(prep["df_test_index"])
+
+
+def train_full_and_predict_returns(
+    df_train,
+    df_test,
+    feature_cols,
+    target_col,
+    model_kind="lgb",
+    params=None,
+    intentional_cfg=None,
+    fe_cfg=None,
+    seed=None,
+    train_only_scored=False,
+    weight_scored=None,
+    weight_unscored=None,
+    df_train_fe=None,
+    df_test_fe=None,
+    feature_set=None,
+    cfg: HullConfig | None = None,
+):
+    """Aplica o mesmo pipeline do treino final, mas retorna `pred_return` (sem aplicar allocation)."""
+    cfg_resolved = _resolve_cfg(cfg)
+    seed_use = SEED if seed is None else seed
+    np.random.seed(seed_use)
+    prep = prepare_train_test_frames(
+        df_train,
+        df_test,
+        feature_cols,
+        target_col,
+        intentional_cfg=intentional_cfg or cfg_resolved.intentional_cfg,
+        fe_cfg=fe_cfg or cfg_resolved.feature_cfg,
+        feature_set=feature_set,
+        train_only_scored=train_only_scored,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
+        df_train_fe=df_train_fe,
+        df_test_fe=df_test_fe,
+        is_scored_col=cfg_resolved.is_scored_col or IS_SCORED_COL,
+    )
+
+    if model_kind == "lgb":
+        params_use = dict(cfg_resolved.best_params or BEST_PARAMS)
+        if params:
+            params_use.update(params)
+        params_use["seed"] = seed_use
+        train_ds = lgb.Dataset(prep["X_tr"], label=prep["y_tr"], weight=prep["train_weight"])
+        model = lgb.train(
+            params_use,
+            train_ds,
+            num_boost_round=int(params_use.get("num_boost_round", 400)),
+        )
+        pred_test = model.predict(prep["X_te"], num_iteration=model.best_iteration or model.current_iteration())
+    elif model_kind == "ridge":
+        alpha = params.get("alpha", 1.0) if params else 1.0
+        model = Ridge(alpha=alpha, random_state=seed_use)
+        model.fit(prep["X_tr"], prep["y_tr"], sample_weight=prep["train_weight"])
+        pred_test = model.predict(prep["X_te"])
+    elif model_kind == "cat" and HAS_CAT:
+        default = {
+            "depth": 6,
+            "learning_rate": 0.05,
+            "iterations": 500,
+            "loss_function": "RMSE",
+            "random_seed": seed_use,
+            "verbose": False,
+        }
+        if params:
+            default.update(params)
+        model = CatBoostRegressor(**default)
+        fit_kwargs = {"verbose": False}
+        if prep["train_weight"] is not None:
+            fit_kwargs["sample_weight"] = prep["train_weight"]
+        model.fit(prep["X_tr"], prep["y_tr"], **fit_kwargs)
+        pred_test = model.predict(prep["X_te"])
+    elif model_kind == "xgb" and HAS_XGB:
+        default = {
+            "n_estimators": 400,
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "random_state": seed_use,
+            "objective": "reg:squarederror",
+        }
+        if params:
+            default.update(params)
+        model = xgb.XGBRegressor(**default)
+        fit_kwargs = {"verbose": False}
+        if prep["train_weight"] is not None:
+            fit_kwargs["sample_weight"] = prep["train_weight"]
+        model.fit(prep["X_tr"], prep["y_tr"], **fit_kwargs)
+        pred_test = model.predict(prep["X_te"])
+    else:
+        raise ValueError(f"Modelo {model_kind} não suportado ou dependência ausente.")
+
+    return pd.Series(pred_test, index=prep["df_test_index"])
 
 
 def prepare_train_test_frames(
@@ -1109,6 +1672,8 @@ def prepare_train_test_frames(
         "X_tr": X_tr,
         "y_tr": y_tr,
         "X_te": X_te,
+        "df_train_base": df_train_base,
+        "df_test_base": df_test_base,
         "df_test_index": df_test_proc.index,
         "feature_cols": feature_cols_aligned,
         "train_weight": train_weight,
@@ -1163,6 +1728,7 @@ __all__ = [
     "map_return_to_alloc",
     "adjusted_sharpe_score",
     "optimize_allocation_scale",
+    "score_oof_predictions_with_allocation",
     "time_cv_lightgbm",
     "sanity_shuffle_test",
     "clipping_sensitivity",
@@ -1171,11 +1737,15 @@ __all__ = [
     "time_cv_lightgbm_weighted",
     "stability_check",
     "run_cv_preds",
+    "run_cv_preds_fitref",
     "calibrate_k_from_cv_preds",
+    "calibrate_k_alpha_from_cv_preds",
+    "time_cv_lightgbm_fitref_oof",
     "expanding_holdout_eval",
     "choose_scored_strategy",
     "compute_sharpe_weights",
     "blend_and_eval",
+    "train_full_and_predict_returns",
     "train_full_and_predict_model",
     "prepare_train_test_frames",
     "add_exp_log",

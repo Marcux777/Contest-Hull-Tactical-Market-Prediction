@@ -13,39 +13,49 @@ Com base na descrição pública do desafio e em materiais externos, o problema 
 - **Domínio:** finanças quantitativas, focado no índice **S&P 500** (mercado de ações dos EUA).
 - **História:** a competição tenta desafiar a Hipótese de Mercado Eficiente (EMH), usando ML para prever retornos futuros e gerar uma estratégia tática de alocação em S&P 500.
 - **Tipo de tarefa de ML:**
-  - No nível de modelagem, é um problema de **regressão de série temporal**: dado o dia *t* e um conjunto de features, o modelo tenta prever o **forward_returns** (retorno excedente do S&P 500 no dia *t+1*).
+  - No nível de modelagem, é um problema de **regressão de série temporal**: dado o dia *t* e um conjunto de features, o modelo tenta prever o retorno futuro do mercado (no dataset isso aparece como `market_forward_excess_returns` e/ou `forward_returns` com `risk_free_rate`).
   - No nível da competição, o modelo precisa devolver, para cada dia, uma **alocação** (exposição entre 0 e 2) em S&P 500 – isto é, quão “comprado” o portfólio fica naquele dia.
+
+### Metadados oficiais (Kaggle)
+
+- **Página:** https://www.kaggle.com/competitions/hull-tactical-market-prediction
+- **Host/Categoria:** Hull Tactical (Featured)
+- **Prêmio:** 100,000 USD
+- **Deadline:** 2025-12-15 23:59 (UTC)
+- **Limites:** 5 submissões/dia; até 5 membros/time
+- **Status (consulta 2025-12-12):** 3458 times; topo da leaderboard ~17.507
+- **Métrica:** `Hull Competition Sharpe` (custom metric)
+- **Tipo de submissão:** kernels-only (Code Competition) — submissão via Notebook/Kernel; a saída é um `submission.parquet` gerado pelo gateway (não há `sample_submission.csv`).
 
 ### Estrutura dos dados (visão geral)
 
 - Série temporal tabular indexada por `date_id` (cada linha é um dia de negociação).
-- Grande número de variáveis agrupadas em famílias:
-  - **M\*** – Market / Momentum / Technical
-  - **E\*** – Macro Economic
-  - **I\*** – Interest Rates
-  - **P\*** – Price / Valuation
-  - **V\*** – Volatility
-  - **S\*** – Sentiment
-  - **MOM\*** – indicadores de momentum adicionais
-  - **D\*** – variáveis dummy / regime
-- Há também uma coluna `is_scored` indicando se aquela linha (dia) é usada na avaliação do leaderboard.
+- Variáveis agrupadas em famílias (presentes no pacote de dados atual):
+  - **D\*** – variáveis dummy / regime (9 colunas)
+  - **E\*** – Macro Economic (20 colunas)
+  - **I\*** – Interest Rates (9 colunas)
+  - **M\*** – Market / Momentum / Technical (18 colunas)
+  - **P\*** – Price / Valuation (13 colunas)
+  - **S\*** – Sentiment (12 colunas)
+  - **V\*** – Volatility (13 colunas)
+- No `train.csv` também existem colunas financeiras: `forward_returns`, `risk_free_rate`, `market_forward_excess_returns`.
+- No `test.csv`, há `is_scored` (quais linhas contam no score) e colunas `lagged_*` para evitar vazamento temporal do label.
 
 ### Alvo, arquivos principais e submissão
 
 - `train.csv`:
-  - contém as features (M\*, E\*, I\*, P\*, V\*, S\*, MOM\*, D\*, etc.),
-  - colunas de retorno atual / `forward_returns` e outras colunas financeiras (como retorno de mercado e taxa livre de risco),
-  - em muitas soluções o alvo é chamado de `target` ou `forward_returns`.
+  - tamanho (pacote atual): **9021 linhas × 98 colunas** (`date_id` de 0 a 9020),
+  - contém as features (D\*, E\*, I\*, M\*, P\*, S\*, V\*) e colunas financeiras (`forward_returns`, `risk_free_rate`, `market_forward_excess_returns`).
 - `test.csv`:
-  - contém versões **defasadas** (lagged) das variáveis de retorno/juros,
-  - inclui `is_scored`, o que ajuda a evitar vazamento temporal direto do label.
-- Formato de submissão:
-  - uma coluna de identificação (tipicamente `date_id`),
-  - uma coluna de decisão, normalmente chamada `allocation`, que representa a exposição diária sugerida pelo modelo (0 = zerado, 2 = alavancado).
+  - no pacote atual, é um **sample pequeno** para testes locais: **10 linhas × 99 colunas** (o teste real/oculto é usado no rerun),
+  - contém `is_scored` e versões **defasadas** (`lagged_*`) das variáveis de retorno/juros.
+- Formato de submissão (Code Competition):
+  - o gateway materializa um `submission.parquet` com uma coluna de ID (`date_id` no sample local; pode variar no rerun) e uma coluna `prediction`;
+  - a `prediction` representa a decisão do modelo (na prática, a exposição/alocação diária — tipicamente em `[0, 2]`).
 
 ### Métrica da competição
 
-- A leaderboard usa uma **métrica customizada baseada em Sharpe**, muitas vezes chamada *Hull competition Sharpe* ou *Adjusted Sharpe*.
+- A leaderboard usa a métrica **`Hull Competition Sharpe`** (custom metric baseada em Sharpe).
 - Em alto nível, a métrica:
   - constrói uma série de retornos da estratégia usando a **alocação prevista** combinada com o retorno de mercado e a taxa livre de risco;
   - calcula uma espécie de **Sharpe ratio ajustado**, com penalidades específicas para drawdowns / eventos extremos negativos.
@@ -62,8 +72,8 @@ Alguns pontos que vão guiar toda a solução:
    - A validação ideal respeita o tempo (splits por blocos de `date_id` ou algo como `TimeSeriesSplit`).
 
 2. **Treino vs. teste com labels defasados**
-   - `train.csv` tem colunas com valor atual de `target` e retorno de mercado.
-   - `test.csv` tem versões defasadas dessas variáveis, além de `is_scored`, como mecanismo explícito contra data leakage.
+   - `train.csv` tem colunas de retorno futuro (`forward_returns`, `market_forward_excess_returns`) e taxa livre de risco (`risk_free_rate`) que **não aparecem no `test.csv` da mesma forma**.
+   - `test.csv` tem versões defasadas (`lagged_*`) dessas variáveis, além de `is_scored`, como mecanismo explícito contra data leakage.
    - Features que usam `target` ou retornos devem ser construídas de forma **causal** (apenas com informação disponível até *t*).
 
 3. **Uso da coluna `is_scored`**
@@ -72,7 +82,7 @@ Alguns pontos que vão guiar toda a solução:
 
 4. **Decisão final é alocação**
    - Fluxo conceitual:
-     1. Modelar `forward_returns` (regressão de série temporal);
+     1. Modelar `market_forward_excess_returns` (ou derivar de `forward_returns - risk_free_rate`);
      2. Aplicar uma função `g(pred_return)` que converte a previsão em `allocation` em [0, 2];
      3. Avaliar o Sharpe ajustado da estratégia resultante.
    - Competidores fortes tendem a:
@@ -98,4 +108,3 @@ Na sequência entraremos na **Etapa 2 – Entendimento dos dados**, analisando:
 - primeiras ideias de pré-processamento e esquema de validação específicos para este desafio.
 
 Essa etapa será feita principalmente em notebooks na pasta `notebooks/`, usando os arquivos `train.csv` e `test.csv` do Kaggle.
-

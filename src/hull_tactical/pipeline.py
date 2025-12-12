@@ -4,7 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from . import data, features
+from . import competition, data, ensemble, features
+from .allocation import AllocationConfig
 from . import models as m
 from .models import FEATURE_CFG_DEFAULT, INTENTIONAL_CFG, default_config, train_full_and_predict_model
 
@@ -17,6 +18,8 @@ def train_pipeline(
     df_train=None,
     df_test=None,
     cfg: m.HullConfig | None = None,
+    target_col: str = "target",
+    allocation_cfg: AllocationConfig | None = None,
 ):
     """
     Minimal train pipeline using existing feature/model helpers.
@@ -25,6 +28,14 @@ def train_pipeline(
     cfg = cfg or default_config()
     if df_train is None or df_test is None:
         df_train, df_test = data.load_raw_data(data_dir)
+
+    # Normaliza colunas e cria um alvo padronizado para o restante do pipeline.
+    df_train, df_test, cols = competition.prepare_train_test(df_train, df_test, normalized_target_col=target_col)
+    cfg.market_col = cols.market_col
+    cfg.rf_col = cols.rf_col
+    cfg.is_scored_col = cols.is_scored_col
+    m.set_data_columns(cols.market_col, cols.rf_col, cols.is_scored_col)
+
     fe_cfg = feature_cfg or cfg.feature_cfg or FEATURE_CFG_DEFAULT
     intent_cfg = intentional_cfg or cfg.intentional_cfg or INTENTIONAL_CFG
     cfg.feature_cfg = fe_cfg
@@ -32,7 +43,7 @@ def train_pipeline(
     train_fe, test_fe, feature_cols, feature_sets, feature_used = features.make_features(
         df_train,
         test_df=df_test,
-        target_col="target",
+        target_col=target_col,
         feature_set=feature_set,
         intentional_cfg=intent_cfg,
         fe_cfg=fe_cfg,
@@ -41,7 +52,7 @@ def train_pipeline(
         df_train,
         df_test,
         feature_cols,
-        target_col="target",
+        target_col=target_col,
         model_kind="lgb",
         params=cfg.best_params,
         alloc_k=None,
@@ -51,6 +62,7 @@ def train_pipeline(
         df_train_fe=train_fe,
         df_test_fe=test_fe,
         feature_set=feature_used,
+        allocation_cfg=allocation_cfg,
         cfg=cfg,
     )
     return allocations
@@ -122,6 +134,8 @@ __all__ = [
     "choose_best_training_variant",
     "run_time_cv",
     "run_time_cv_fitref",
+    "run_time_cv_fitref_oof",
+    "run_ensemble_fitref_oof",
     "run_holdout_eval",
 ]
 
@@ -196,6 +210,120 @@ def run_time_cv_fitref(
         num_boost_round=num_boost_round,
         cfg=cfg_use,
     )
+
+
+def run_time_cv_fitref_oof(
+    df_train,
+    feature_set: str,
+    target_col: str = "target",
+    *,
+    cfg: m.HullConfig | None = None,
+    n_splits: int = 4,
+    val_frac: float = 0.12,
+    params_override=None,
+    num_boost_round: int = 200,
+    weight_scored: float | None = None,
+    weight_unscored: float | None = None,
+    train_only_scored: bool = False,
+    allocation_cfg: AllocationConfig | None = None,
+    return_oof_df: bool = False,
+):
+    """CV fit_ref com calibração global de allocation em OOF.
+
+    Retorna um dict com: metrics/summary/best_k/best_alpha/oof_sharpe e (opcional) oof_pred_df.
+    """
+    cfg_use = cfg or default_config()
+    return m.time_cv_lightgbm_fitref_oof(
+        df_train,
+        feature_set,
+        target_col,
+        n_splits=n_splits,
+        val_frac=val_frac,
+        params_override=params_override,
+        num_boost_round=num_boost_round,
+        weight_scored=weight_scored,
+        weight_unscored=weight_unscored,
+        train_only_scored=train_only_scored,
+        allocation_cfg=allocation_cfg,
+        return_oof_df=return_oof_df,
+        cfg=cfg_use,
+    )
+
+
+def run_ensemble_fitref_oof(
+    df_train,
+    *,
+    model_specs: dict[str, dict],
+    target_col: str = "target",
+    cfg: m.HullConfig | None = None,
+    n_splits: int = 4,
+    val_frac: float = 0.12,
+    allocation_cfg: AllocationConfig | None = None,
+    compute_weights: bool = True,
+    ridge_alpha: float = 0.1,
+):
+    """Builds OOF predictions per spec (fit_ref), then evaluates prediction-level ensembles.
+
+    `model_specs` is a dict:
+      {name: {"model_kind": "lgb|ridge|xgb|cat", "feature_set": "...", "params_override": {...}, ...}}
+    Supported optional keys: num_boost_round, seed, weight_scored, weight_unscored, train_only_scored.
+    """
+    cfg_use = cfg or default_config()
+    pred_frames: dict[str, object] = {}
+    metrics_by_model: dict[str, object] = {}
+    for name, spec in model_specs.items():
+        feature_set = spec.get("feature_set")
+        if not feature_set:
+            raise ValueError(f"model_specs['{name}'] missing required key 'feature_set'")
+        model_kind = spec.get("model_kind", "lgb")
+        params_override = spec.get("params_override")
+        num_boost_round = int(spec.get("num_boost_round", 200))
+        seed = spec.get("seed")
+        weight_scored = spec.get("weight_scored")
+        weight_unscored = spec.get("weight_unscored")
+        train_only_scored = bool(spec.get("train_only_scored", False))
+
+        mets, pred_df = m.run_cv_preds_fitref(
+            df_train,
+            feature_set,
+            target_col,
+            model_kind=model_kind,
+            params_override=params_override,
+            n_splits=n_splits,
+            val_frac=val_frac,
+            num_boost_round=num_boost_round,
+            seed=seed,
+            weight_scored=weight_scored,
+            weight_unscored=weight_unscored,
+            train_only_scored=train_only_scored,
+            allocation_cfg=None,  # allocate only after blending
+            cfg=cfg_use,
+        )
+        pred_frames[name] = pred_df
+        metrics_by_model[name] = mets
+
+    alloc_cfg = allocation_cfg or AllocationConfig()
+    market_col = cfg_use.market_col or m.MARKET_COL
+    rf_col = cfg_use.rf_col or m.RF_COL
+    is_scored_col = cfg_use.is_scored_col or m.IS_SCORED_COL or "is_scored"
+
+    weights = (
+        ensemble.compute_oof_sharpe_weights(
+            pred_frames, allocation_cfg=alloc_cfg, market_col=market_col, rf_col=rf_col, is_scored_col=is_scored_col
+        )
+        if compute_weights
+        else {}
+    )
+    scores = ensemble.evaluate_prediction_ensembles(
+        pred_frames,
+        allocation_cfg=alloc_cfg,
+        market_col=market_col,
+        rf_col=rf_col,
+        is_scored_col=is_scored_col,
+        weights=weights or None,
+        ridge_alpha=ridge_alpha,
+    )
+    return {"scores": scores, "weights": weights, "pred_frames": pred_frames, "metrics_by_model": metrics_by_model}
 
 
 def run_holdout_eval(

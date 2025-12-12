@@ -186,17 +186,36 @@ def add_family_aggs(df: pd.DataFrame) -> pd.DataFrame:
     return append_columns(df_out, new_cols)
 
 
-def add_regime_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Creates regime features based on lagged market returns."""
+def add_regime_features(df: pd.DataFrame, fit_ref: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Creates regime features based on lagged market returns.
+
+    If fit_ref is provided, uses its distribution to define the `regime_high_vol`
+    threshold (prevents leaking future validation/test distribution).
+    """
     if "date_id" not in df.columns:
         return df
     df_out = df.copy()
     df_sorted = df.sort_values("date_id")
     if "market_forward_excess_returns" in df_sorted.columns:
-        lagged_market = df_sorted["market_forward_excess_returns"].shift(1).reindex(df.index)
+        lagged_market_sorted = df_sorted["market_forward_excess_returns"].shift(1)
+        regime_std_sorted = lagged_market_sorted.rolling(window=20, min_periods=5).std()
+        lagged_market = lagged_market_sorted.reindex(df.index)
+        regime_std = regime_std_sorted.reindex(df.index)
+
+        threshold = None
+        if fit_ref is not None and "date_id" in fit_ref.columns and "market_forward_excess_returns" in fit_ref.columns:
+            ref_sorted = fit_ref.sort_values("date_id")
+            ref_lagged = ref_sorted["market_forward_excess_returns"].shift(1)
+            ref_std = ref_lagged.rolling(window=20, min_periods=5).std()
+            thr = float(ref_std.median(skipna=True)) if ref_std.notna().any() else None
+            if thr is not None and np.isfinite(thr):
+                threshold = thr
+        if threshold is None:
+            threshold = float(regime_std_sorted.median(skipna=True)) if regime_std_sorted.notna().any() else 0.0
+
         df_out["lagged_market_excess"] = lagged_market
-        df_out["regime_std_20"] = lagged_market.rolling(window=20, min_periods=5).std()
-        df_out["regime_high_vol"] = (df_out["regime_std_20"] > df_out["regime_std_20"].median()).astype(int)
+        df_out["regime_std_20"] = regime_std
+        df_out["regime_high_vol"] = (regime_std > threshold).astype(int)
     return df_out
 
 
@@ -209,7 +228,8 @@ def add_intentional_features(df: pd.DataFrame, intentional_cfg: dict | None = No
     if "market_forward_excess_returns" in df_out.columns:
         df_sorted = df_out.sort_values("date_id") if "date_id" in df_out.columns else df_out
         excess = df_sorted["market_forward_excess_returns"]
-        lagged_excess = excess.shift(1).reindex(df.index)
+        lagged_excess_sorted = excess.shift(1)
+        lagged_excess = lagged_excess_sorted.reindex(df.index)
         clip_lo, clip_hi = cfg.get("clip_bounds", (-0.05, 0.05))
         clipped = lagged_excess.clip(clip_lo, clip_hi)
         scaled = clipped * cfg.get("tanh_scale", 1.0)
@@ -218,12 +238,14 @@ def add_intentional_features(df: pd.DataFrame, intentional_cfg: dict | None = No
         df_out["lagged_excess_tanh"] = np.tanh(scaled)
         window = cfg.get("zscore_window", 20)
         if window and window > 1:
-            rolling_std = lagged_excess.rolling(window=window, min_periods=max(3, window // 2)).std()
-            z = (lagged_excess - lagged_excess.rolling(window=window, min_periods=max(3, window // 2)).mean()) / rolling_std.replace(0, np.nan)
+            min_periods = max(3, window // 2)
+            rolling_std = lagged_excess_sorted.rolling(window=window, min_periods=min_periods).std()
+            rolling_mean = lagged_excess_sorted.rolling(window=window, min_periods=min_periods).mean()
+            z = (lagged_excess_sorted - rolling_mean) / rolling_std.replace(0, np.nan)
             z_clip = cfg.get("zscore_clip", None)
             if z_clip:
                 z = z.clip(-z_clip, z_clip)
-            df_out["lagged_excess_z"] = z.fillna(0)
+            df_out["lagged_excess_z"] = z.reindex(df.index).fillna(0)
     return df_out
 
 
@@ -375,7 +397,7 @@ def build_feature_sets(df: pd.DataFrame, target: str, intentional_cfg: dict | No
     orig_numeric = df.select_dtypes(include=[np.number]).columns.tolist()
     df_eng = add_lagged_market_features(df)
     df_eng = add_family_aggs(df_eng)
-    df_eng = add_regime_features(df_eng)
+    df_eng = add_regime_features(df_eng, fit_ref=fit_ref)
     df_eng = add_intentional_features(df_eng, intentional_cfg=intentional_cfg)
     df_eng = apply_feature_engineering(df_eng, target, fe_cfg=fe_cfg, fit_ref=fit_ref)
     df_eng = add_cross_sectional_norms(df_eng)
