@@ -63,6 +63,28 @@ def _lagged_market_excess_sorted(df_sorted: pd.DataFrame) -> pd.Series | None:
     return None
 
 
+def _assert_no_future_return_leakage(feature_cols: list[str], target: str) -> None:
+    """Guardrail to prevent target/future return columns from entering the feature list."""
+    forbidden_terms = {
+        str(target) if target else "",
+        "forward_returns",
+        "market_forward_excess_returns",
+        "risk_free_rate",
+    }
+    forbidden_terms.update({t.lower() for t in list(forbidden_terms) if t})
+
+    def _is_lagged(name: str) -> bool:
+        return "lagged_" in name
+
+    for col in feature_cols:
+        col_lower = str(col).lower()
+        for term in forbidden_terms:
+            if not term:
+                continue
+            if term in col_lower and not _is_lagged(col_lower):
+                raise AssertionError(f"feature_cols contém coluna não causal/futura: {col}")
+
+
 def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[str]]:
     sort_key = "date_id" if "date_id" in df.columns else None
     df_sorted = df.sort_values(sort_key) if sort_key else df.copy()
@@ -75,6 +97,7 @@ def prepare_features(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, list[
             drop_cols.add(col)
     feature_cols = [c for c in numeric_cols if c not in drop_cols]
     feature_cols = [c for c in feature_cols if df_sorted[c].nunique() > 1]
+    _assert_no_future_return_leakage(feature_cols, target)
     return df_sorted, feature_cols
 
 

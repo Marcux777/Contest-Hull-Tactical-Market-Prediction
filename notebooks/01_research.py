@@ -889,6 +889,18 @@ train_fe_all, test_fe_all, feature_cols_main, feature_sets, main_feature_set = m
     fe_cfg=FEATURE_CFG_DEFAULT,
 )
 _df = train_fe_all
+
+# Guardrail explícito: nenhum feature_set pode conter alvo ou retornos futuros (exceto versões lagged_).
+_leak_terms = {str(target_col), "forward_returns", "risk_free_rate", "market_forward_excess_returns"}
+_leak_terms = _leak_terms.union({t.lower() for t in _leak_terms})
+for fs_name, cols in feature_sets.items():
+    bad = []
+    for col in cols:
+        col_norm = str(col).lower()
+        if any(term in col_norm for term in _leak_terms) and not col_norm.startswith("lagged_"):
+            bad.append(col)
+    assert not bad, f"Leakage detectado em {fs_name}: {bad}"
+
 # Contagem de features por set
 feat_counts = pd.DataFrame(
     [{"feature_set": name, "n_features": len(cols)} for name, cols in feature_sets.items()]
@@ -1033,6 +1045,215 @@ if not cv_summary_df.empty:
         "folds",
     ]
     display(cv_summary_df[cols_order])
+
+# Diagnóstico: delta vs baseline (alloc constante) por feature set/fold
+def _delta_vs_baseline(metrics_dict: dict) -> pd.DataFrame:
+    rows = []
+    for name, metrics in metrics_dict.items():
+        if not metrics:
+            continue
+        df_m = pd.DataFrame(metrics)
+        if "const_sharpe" not in df_m.columns:
+            continue
+        delta = df_m["sharpe"] - df_m["const_sharpe"]
+        rows.append(
+            {
+                "feature_set": name,
+                "mean_delta": float(delta.mean()),
+                "p20_delta": float(delta.quantile(0.2)),
+                "median_delta": float(delta.median()),
+                "min_delta": float(delta.min()),
+                "max_delta": float(delta.max()),
+                "sharpe_mean": float(df_m["sharpe"].mean()),
+                "const_mean": float(df_m["const_sharpe"].mean()),
+                "folds": len(df_m),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["mean_delta", "p20_delta"], ascending=False)
+
+delta_baseline_df = _delta_vs_baseline(cv_metrics)
+if not delta_baseline_df.empty:
+    print("Sharpe delta vs baseline (alloc=1.0) — positivo = modelo agrega sobre o constante:")
+    display(delta_baseline_df)
+else:
+    print("Sem métricas para delta vs baseline (const_sharpe ausente).")
+
+# Baseline de risco sem predição: usa apenas regime/std para modular exposição.
+def risk_managed_baseline_cv(
+    df: pd.DataFrame,
+    *,
+    k: float = 1.0,
+    alpha: float = 1.0,
+    allocation_cfg: AllocationConfig | None = None,
+    n_splits: int = 5,
+    val_frac: float = 0.10,
+    gap: int = 0,
+    cfg=PIPELINE_CFG,
+):
+    cfg_use = cfg or PIPELINE_CFG
+    market_col = cfg_use.market_col or MARKET_COL
+    rf_col = cfg_use.rf_col or RF_COL
+    is_scored_col = cfg_use.is_scored_col or IS_SCORED_COL
+    alloc_cfg = allocation_cfg or AllocationConfig()
+    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac, gap=gap)
+    rows = []
+    for i, (_mask_tr, mask_val) in enumerate(splits, 1):
+        df_val = df.loc[mask_val].copy()
+        if df_val.empty:
+            continue
+        const_signal = pd.Series(1.0, index=df_val.index)
+        alloc = apply_allocation_strategy(const_signal, df_val, k=float(k), alpha=float(alpha), cfg=alloc_cfg)
+        sharpe_adj, details = adjusted_sharpe_score(
+            df_val,
+            alloc,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
+        )
+        n_scored = int(df_val[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val.columns else len(df_val)
+        rows.append(
+            {
+                "fold": i,
+                "sharpe": sharpe_adj,
+                "strategy_vol": details.get("strategy_vol"),
+                "n_val": len(df_val),
+                "n_scored": n_scored,
+            }
+        )
+    return rows
+
+risk_baseline_cfg = ALLOC_STRATEGY_CFG if "ALLOC_STRATEGY_CFG" in locals() else AllocationConfig()
+metrics_risk_baseline = risk_managed_baseline_cv(
+    train,
+    k=PIPELINE_CFG.alloc_k if hasattr(PIPELINE_CFG, "alloc_k") else 1.0,
+    alpha=PIPELINE_CFG.alloc_alpha if hasattr(PIPELINE_CFG, "alloc_alpha") else 1.0,
+    allocation_cfg=risk_baseline_cfg,
+    n_splits=5,
+    val_frac=0.10,
+)
+if metrics_risk_baseline:
+    df_risk_base = pd.DataFrame(metrics_risk_baseline)
+    print(
+        f"Baseline de risco (sem pred): Sharpe médio={df_risk_base['sharpe'].mean():.4f} | "
+        f"P20={df_risk_base['sharpe'].quantile(0.2):.4f} | vol_mediana={df_risk_base['strategy_vol'].median():.4f}"
+    )
+    display(df_risk_base)
+else:
+    print("Baseline de risco (sem pred) não pôde ser calculado (cheque date_id/is_scored).")
+
+# %%
+# Walk-forward curto (janelas de validação de 30–120 dias) para aproximar horizonte de 10 dias do test
+if "date_id" in train.columns:
+    n_dates = train["date_id"].nunique()
+    short_windows = [30, 60, 90, 120]
+    wf_rows = []
+    for win in short_windows:
+        val_frac = max(1 / n_dates, min(0.5, win / n_dates))
+        metrics_short = pipeline.run_time_cv(
+            train,
+            feature_set=PIPELINE_FEATURE_SET,
+            target_col=target_col,
+            cfg=PIPELINE_CFG,
+            n_splits=5,
+            val_frac=val_frac,
+            gap=5,
+            num_boost_round=180,
+        )
+        summary_short = summarize_cv_metrics(metrics_short) or {}
+        sharpe_vals = [m["sharpe"] for m in metrics_short] if metrics_short else []
+        wf_rows.append(
+            {
+                "window_days": win,
+                "val_frac": val_frac,
+                "folds": len(metrics_short),
+                "sharpe_mean": summary_short.get("sharpe_mean"),
+                "sharpe_p20": float(pd.Series(sharpe_vals).quantile(0.2)) if sharpe_vals else np.nan,
+                "const_sharpe_mean": summary_short.get("const_sharpe_mean"),
+            }
+        )
+    wf_df = pd.DataFrame(wf_rows)
+    print("Walk-forward curto (val windows 30–120 dias):")
+    display(wf_df)
+else:
+    print("Sem date_id; walk-forward curto não aplicável.")
+
+# %%
+# Baseline direcional simples (lags/regime) para diversificar sinais sem modelo
+def build_directional_signal(df: pd.DataFrame) -> pd.Series:
+    if "lagged_market_forward_excess_returns" in df.columns:
+        lag = pd.to_numeric(df["lagged_market_forward_excess_returns"], errors="coerce")
+    elif MARKET_COL in df.columns:
+        lag = pd.to_numeric(df[MARKET_COL], errors="coerce").shift(1)
+    else:
+        return pd.Series(0.0, index=df.index)
+    lag = lag.clip(-0.03, 0.03)
+    regime = df.get("regime_high_vol")
+    if regime is not None:
+        lag = lag * np.where(regime.fillna(0) > 0, 0.5, 1.0)
+    return lag.fillna(0.0)
+
+
+def directional_rule_cv(
+    df: pd.DataFrame,
+    *,
+    allocation_cfg: AllocationConfig | None = None,
+    n_splits: int = 5,
+    val_frac: float = 0.10,
+    gap: int = 5,
+    cfg=PIPELINE_CFG,
+):
+    cfg_use = cfg or PIPELINE_CFG
+    market_col = cfg_use.market_col or MARKET_COL
+    rf_col = cfg_use.rf_col or RF_COL
+    is_scored_col = cfg_use.is_scored_col or IS_SCORED_COL
+    sig_full = build_directional_signal(df)
+    alloc_cfg = allocation_cfg or AllocationConfig()
+    splits = make_time_splits(df, date_col="date_id", n_splits=n_splits, val_frac=val_frac, gap=gap)
+    rows = []
+    for i, (_mask_tr, mask_val) in enumerate(splits, 1):
+        df_val = df.loc[mask_val].copy()
+        if df_val.empty:
+            continue
+        sig_val = sig_full.loc[mask_val]
+        alloc = apply_allocation_strategy(sig_val, df_val, k=float(cfg_use.alloc_k), alpha=float(cfg_use.alloc_alpha), cfg=alloc_cfg)
+        sharpe_adj, details = adjusted_sharpe_score(
+            df_val,
+            alloc,
+            market_col=market_col,
+            rf_col=rf_col,
+            is_scored_col=is_scored_col,
+        )
+        n_scored = int(df_val[is_scored_col].sum()) if is_scored_col and is_scored_col in df_val.columns else len(df_val)
+        rows.append(
+            {
+                "fold": i,
+                "sharpe": sharpe_adj,
+                "strategy_vol": details.get("strategy_vol"),
+                "n_val": len(df_val),
+                "n_scored": n_scored,
+            }
+        )
+    return rows
+
+
+directional_metrics = directional_rule_cv(
+    train,
+    allocation_cfg=ALLOC_STRATEGY_CFG if "ALLOC_STRATEGY_CFG" in locals() else AllocationConfig(),
+    n_splits=5,
+    val_frac=0.10,
+    gap=5,
+)
+if directional_metrics:
+    df_dir = pd.DataFrame(directional_metrics)
+    print(
+        f"Baseline direcional (lag/regime, sem modelo): Sharpe médio={df_dir['sharpe'].mean():.4f} | "
+        f"P20={df_dir['sharpe'].quantile(0.2):.4f} | vol_mediana={df_dir['strategy_vol'].median():.4f}"
+    )
+    display(df_dir)
+else:
+    print("Baseline direcional não pôde ser calculado (cheque date_id/is_scored).")
 
 # %% [markdown]
 # ### Comparação: feature sets D_intentional vs C_regimes (Sharpe local)
@@ -1339,6 +1560,33 @@ if HAS_CAT:
 else:
     print("CatBoost não disponível; pulei.")
 
+# Delta vs baseline (alloc=1.0) por fold e percentis — evita ler só médias
+def delta_vs_const(metrics_model, metrics_const, name="model"):
+    if not metrics_model or not metrics_const:
+        print(f"[{name}] métricas insuficientes para delta vs const.")
+        return None, None
+    df_m = pd.DataFrame(metrics_model).copy()
+    df_c = pd.DataFrame(metrics_const).copy()
+    df = df_m.merge(df_c[["fold", "sharpe"]].rename(columns={"sharpe": "sharpe_const"}), on="fold", how="left")
+    df["delta"] = df["sharpe"] - df["sharpe_const"]
+    summ = df["delta"].describe(percentiles=[0.2, 0.5, 0.8])[["mean", "std", "20%", "50%", "80%", "min", "max"]]
+    print(f"\nDelta vs const ({name})")
+    display(df[["fold", "sharpe", "sharpe_const", "delta", "best_k", "best_alpha"]])
+    display(summ.to_frame(name="delta"))
+    return df, summ
+
+
+# Rode deltas para os principais modelos (ajuste conforme métricas disponíveis)
+_ = delta_vs_const(metrics_lgb_bag, metrics_const, "lgb_bag")
+_ = delta_vs_const(metrics_lgb_weighted, metrics_const, "lgb_weighted")
+_ = delta_vs_const(metrics_lgb_cons, metrics_const, "lgb_conservative")
+_ = delta_vs_const(metrics_lgb_scored, metrics_const, "lgb_scored_only")
+_ = delta_vs_const(metrics_ridge, metrics_const, "ridge")
+if HAS_XGB:
+    _ = delta_vs_const(metrics_xgb, metrics_const, "xgb")
+if HAS_CAT:
+    _ = delta_vs_const(metrics_cat, metrics_const, "cat")
+
 if not preds_lgb_bag.empty:
     ensemble_sources["lgb_bag"] = {"preds": preds_lgb_bag, "metrics": metrics_lgb_bag}
 elif not preds_lgb.empty:
@@ -1396,6 +1644,41 @@ if not k_search_lgb.empty:
     display(k_search_lgb.head(10))
 else:
     best_k_from_cv, best_alpha_from_cv = None, None
+
+# Baseline de risco puro (pred=0, k=0) usando o mesmo AllocationConfig — mede ganho só de estratégia
+risk_only_splits = make_time_splits(_df, date_col="date_id", n_splits=5, val_frac=0.10, gap=5)
+risk_only_rows = []
+zero_signal = pd.Series(0.0, index=_df.index)
+for i, (_mask_tr, mask_val) in enumerate(risk_only_splits, 1):
+    df_val = _df.loc[mask_val]
+    if df_val.empty:
+        continue
+    alloc = apply_allocation_strategy(zero_signal.loc[mask_val], df_val, k=0.0, alpha=1.0, cfg=ALLOC_STRATEGY_CFG)
+    sharpe_adj, details = adjusted_sharpe_score(
+        df_val,
+        alloc,
+        market_col=MARKET_COL,
+        rf_col=RF_COL,
+        is_scored_col=IS_SCORED_COL,
+    )
+    risk_only_rows.append(
+        {
+            "fold": i,
+            "sharpe": sharpe_adj,
+            "strategy_vol": details.get("strategy_vol"),
+            "n_val": len(df_val),
+            "n_scored": int(df_val[IS_SCORED_COL].sum()) if IS_SCORED_COL and IS_SCORED_COL in df_val.columns else len(df_val),
+        }
+    )
+if risk_only_rows:
+    df_risk_only = pd.DataFrame(risk_only_rows)
+    print(
+        f"Baseline risco puro (k=0, pred=0) com AllocationConfig: Sharpe médio={df_risk_only['sharpe'].mean():.4f} | "
+        f"P20={df_risk_only['sharpe'].quantile(0.2):.4f} | vol_mediana={df_risk_only['strategy_vol'].median():.4f}"
+    )
+    display(df_risk_only)
+else:
+    print("Baseline risco puro (k=0, pred=0) não pôde ser calculado.")
 
 # Blend focado em produção (LGB bag + LGB conservador + Ridge) com pesos fixos
 production_models = ["lgb_bag", "lgb_conservative", "ridge"]

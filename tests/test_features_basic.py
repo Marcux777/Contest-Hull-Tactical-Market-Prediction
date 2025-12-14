@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,3 +99,17 @@ def test_make_features_does_not_use_future_return_columns_as_features():
             raise AssertionError(f"unexpected feature uses market_forward_excess_returns: {col}")
         if col.startswith("target"):
             raise AssertionError(f"unexpected feature uses target: {col}")
+
+
+def test_leakage_guard_blocks_future_return_columns():
+    allowed = ["M1", "lagged_forward_returns", "lagged_market_forward_excess_returns_was_nan"]
+    features._assert_no_future_return_leakage(allowed, target="target")
+
+    with pytest.raises(AssertionError):
+        features._assert_no_future_return_leakage(["M1", "forward_returns"], target="target")
+    with pytest.raises(AssertionError):
+        features._assert_no_future_return_leakage(["market_forward_excess_returns_mean"], target="target")
+    with pytest.raises(AssertionError):
+        features._assert_no_future_return_leakage(["risk_free_rate"], target="target")
+    with pytest.raises(AssertionError):
+        features._assert_no_future_return_leakage(["target"], target="target")

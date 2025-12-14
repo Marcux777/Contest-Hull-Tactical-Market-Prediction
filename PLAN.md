@@ -92,3 +92,15 @@
   - [x] Extrair `metric.py` com a métrica oficial (sem depender de `models.py`).
   - [x] Garantir `features.py` causal (sem leakage) e documentar invariantes.
   - [x] Smoke-check: `python scripts/scan_secrets.py --history` + `pytest`.
+- [x] Guardrail leakage de forward/target
+  - [x] Adicionar assert no pipeline de features para bloquear `forward_returns`/`market_forward_excess_returns`/`target` (exceto versões `lagged_`) em `feature_cols`.
+  - [x] Cobrir com teste rápido reforçando o guardrail (além dos testes existentes).
+  - [x] Sincronizar jupytext se alguma célula/notebook for tocada (se aplicável).
+- [x] Notebook reforços (delta vs baseline e baseline de risco)
+  - [x] Inserir assert explícito de leakage nos `feature_sets` do `01_research`.
+  - [x] Adicionar blocos de diagnóstico: Sharpe vs baseline (delta por fold/percentis) e baseline de risco sem predição.
+  - [x] Sincronizar notebook (`jupytext --sync notebooks/01_research.ipynb`).
+- [x] Walk-forward curto e baseline direcional
+  - [x] Adicionar CV com janelas menores (30–120 dias) no notebook.
+  - [x] Adicionar baseline direcional (lags/regime) para checar ganho sem modelo.
+  - [x] Sincronizar jupytext.
